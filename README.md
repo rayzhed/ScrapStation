@@ -6,11 +6,14 @@
 
 **A desktop game browser and downloader — driven entirely by community YAML configs.**
 
-[![Release](https://img.shields.io/github/v/release/rayzhed/ScrapStation?style=flat-square&color=00e5ff&label=latest)](https://github.com/rayzhed/ScrapStation/releases/latest)
-[![License](https://img.shields.io/github/license/rayzhed/ScrapStation?style=flat-square&color=00e5ff)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-blue?style=flat-square&color=00e5ff)](https://github.com/rayzhed/ScrapStation/releases/latest)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865f2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/tr32SsezDA)
-[![CI](https://img.shields.io/github/actions/workflow/status/rayzhed/ScrapStation/ci.yml?style=flat-square&label=CI&color=00e5ff)](https://github.com/rayzhed/ScrapStation/actions)
+[![Latest Release](https://img.shields.io/github/v/release/rayzhed/ScrapStation?style=for-the-badge&logo=github&color=00e5ff&logoColor=black&label=latest)](https://github.com/rayzhed/ScrapStation/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/rayzhed/ScrapStation/total?style=for-the-badge&logo=github&color=00e5ff&logoColor=black&label=downloads)](https://github.com/rayzhed/ScrapStation/releases)
+[![Stars](https://img.shields.io/github/stars/rayzhed/ScrapStation?style=for-the-badge&logo=github&color=00e5ff&logoColor=black)](https://github.com/rayzhed/ScrapStation/stargazers)
+
+[![Platform](https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/rayzhed/ScrapStation/releases/latest)
+[![License](https://img.shields.io/github/license/rayzhed/ScrapStation?style=for-the-badge&color=00e5ff&logoColor=black)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/rayzhed/ScrapStation/ci.yml?style=for-the-badge&label=build&logo=githubactions&logoColor=white)](https://github.com/rayzhed/ScrapStation/actions)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865f2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tr32SsezDA)
 
 [**Download**](https://github.com/rayzhed/ScrapStation/releases/latest) · [**Documentation**](https://rayzhed.github.io/ScrapStation/) · [**Discord**](https://discord.gg/tr32SsezDA)
 
