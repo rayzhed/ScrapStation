@@ -40,6 +40,10 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      - name: Create dummy frontend dist
+        run: New-Item -ItemType Directory -Force -Path build
+        shell: pwsh
+
       - name: Cargo check
         working-directory: src-tauri
         run: cargo check
