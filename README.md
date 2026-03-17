@@ -1,51 +1,134 @@
+<div align="center">
+
+<img src="src-tauri/icons/128x128@2x.png" alt="ScrapStation" width="120" />
+
 # ScrapStation
 
-A desktop game browser and downloader built with Tauri v2 + SvelteKit.
+**A desktop game browser and downloader — driven entirely by community YAML configs.**
 
-Browse games from any community-made source config, view game details, manage downloads, and track your local library — all from one place.
+[![Release](https://img.shields.io/github/v/release/rayzhed/ScrapStation?style=flat-square&color=00e5ff&label=latest)](https://github.com/rayzhed/ScrapStation/releases/latest)
+[![License](https://img.shields.io/github/license/rayzhed/ScrapStation?style=flat-square&color=00e5ff)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue?style=flat-square&color=00e5ff)](https://github.com/rayzhed/ScrapStation/releases/latest)
+[![Discord](https://img.shields.io/discord/tr32SsezDA?style=flat-square&color=5865f2&label=Discord&logo=discord&logoColor=white)](https://discord.gg/tr32SsezDA)
+[![CI](https://img.shields.io/github/actions/workflow/status/rayzhed/ScrapStation/ci.yml?style=flat-square&label=CI&color=00e5ff)](https://github.com/rayzhed/ScrapStation/actions)
+
+[**Download**](https://github.com/rayzhed/ScrapStation/releases/latest) · [**Documentation**](https://rayzhed.github.io/ScrapStation/) · [**Discord**](https://discord.gg/tr32SsezDA)
+
+</div>
+
+---
+
+## What is ScrapStation?
+
+ScrapStation lets you browse and download games from any website — without writing a single line of code. You describe the site in a YAML file, and the engine handles everything: scraping listings, rendering detail pages, resolving download links across file hosters, handling logins, extracting archives, and tracking your library.
+
+One config file = one source. The community shares configs. You just drop them in.
+
+---
 
 ## Features
 
-- **Source system** — plug in any site via a YAML config file; drag-and-drop `.yaml` files to install new sources
-- **Smart downloader** — auto-detects the file host and applies the correct download strategy automatically
-- **Library tracker** — tracks installed games, links downloads, and auto-detects executables for launching
-- **Archive extraction** — supports `.rar`, `.7z`, `.zip`, and multi-part archives with password support
-- **Per-source authentication** — login via embedded WebView for sources that require accounts
-- **Live source reload** — drop or remove YAML files while the app is running; the source list updates automatically
+| | |
+|---|---|
+| **Source system** | Plug in any site via a `.yaml` config file — drag-and-drop to install |
+| **Smart downloader** | Auto-detects the file host and applies the correct download strategy |
+| **WebView downloads** | Handles JavaScript-gated hosters with countdown timers and dynamic buttons |
+| **Link resolution** | Follows redirect chains, extracts IDs, builds API URLs — all in YAML |
+| **Archive extraction** | `.rar`, `.7z`, `.zip`, multi-part archives, password support |
+| **Library tracker** | Tracks installed games, links downloads, auto-detects executables |
+| **Authentication** | Per-source login via embedded WebView — sessions persist across restarts |
+| **Live reload** | Drop or remove YAML files while the app is running — no restart needed |
+| **Settings UI** | Each source can define its own settings panel, entirely in YAML |
+| **Detail pages** | Rich game pages: hero banner, trailer, metadata, install steps, download buttons |
 
-## Prerequisites
+---
 
-- [Rust](https://rustup.rs/) (stable)
-- [Node.js](https://nodejs.org/) + [pnpm](https://pnpm.io/)
+## Download
+
+Grab the latest installer from the [**Releases**](https://github.com/rayzhed/ScrapStation/releases/latest) page.
+
+| File | Description |
+|---|---|
+| `ScrapStation_x.x.x_x64-setup.exe` | NSIS installer — recommended |
+| `ScrapStation_x.x.x_x64_en-US.msi` | MSI installer |
+
+> Windows may show a SmartScreen warning on first launch. Click **More info → Run anyway** — this is expected for unsigned apps.
+
+---
+
+## Adding Sources
+
+Drop any `.yaml` source config onto the app window, or place it in:
+
+```
+%APPDATA%\ScrapStation\sources\
+```
+
+Sources are **hot-reloaded** — no restart required. The sidebar updates instantly.
+
+Want to write your own? The full guide is at [**rayzhed.github.io/ScrapStation**](https://rayzhed.github.io/ScrapStation/).
+
+---
+
+## Community
+
+<div align="center">
+
+### Join the Discord to get source configs, share your own, and follow the project
+
+[![Join Discord](https://img.shields.io/badge/Join%20the%20Discord-%235865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tr32SsezDA)
+
+The Discord is where configs are shared, bugs are discussed, and new versions are announced.
+
+</div>
+
+---
+
+## Building from source
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (stable toolchain)
+- [Node.js](https://nodejs.org/) v20+
+- [pnpm](https://pnpm.io/)
 - [Tauri v2 prerequisites](https://tauri.app/start/prerequisites/)
 
-## Development
+### Setup
 
 ```bash
+git clone https://github.com/rayzhed/ScrapStation.git
+cd ScrapStation
 pnpm install
 pnpm tauri dev
 ```
 
-## Build
+### Build installer
 
 ```bash
 pnpm tauri build
+# Output: src-tauri/target/release/bundle/
 ```
 
-## Adding Sources
+---
 
-Drop any `.yaml` source config onto the app window, or place it manually in:
+## Tech stack
 
-- **Windows**: `%APPDATA%\ScrapStation\sources\`
+- **Frontend** — SvelteKit, TypeScript, Tailwind CSS, Motion
+- **Backend** — Rust, Tauri v2
+- **Archive support** — `sevenz-rust`, `unrar`, `zip`
 
-Sources are hot-reloaded — no restart required.
+---
 
-## Tech Stack
+## Contributing
 
-- **Frontend**: SvelteKit, TypeScript, Tailwind CSS, Motion
-- **Backend**: Rust, Tauri v2
-- **Archive support**: `sevenz-rust`, `unrar`, `zip`
+See [**CONTRIBUTING.md**](CONTRIBUTING.md) for the branch model, commit style, and how to open a PR.
+
+`main` → stable releases only
+`dev` → active development
+`feature/*` → branch from `dev`, PR back to `dev`
+
+---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
