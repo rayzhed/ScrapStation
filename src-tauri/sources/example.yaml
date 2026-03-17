@@ -1,0 +1,458 @@
+# ==============================================================================
+# SCRAPSTATION — EXAMPLE SOURCE CONFIG
+# ==============================================================================
+# This file loads in the app as a working source called "Example Site".
+# The selectors point at https://example.com which has no game listings,
+# so the grid will be empty — but every section here is real and documented.
+#
+# To build your own source: copy this file, rename it to <your-id>.yaml,
+# and replace the values. Remove any section you don't need.
+# ==============================================================================
+
+
+# ── IDENTITY ───────────────────────────────────────────────────────────────────
+
+name: Example Site
+id: example                         # must match the filename (example.yaml)
+type: html_scraper                  # html_scraper | json_api
+base_url: https://example.com
+description: "Template source — replace with a real site."
+
+
+# ── UI ─────────────────────────────────────────────────────────────────────────
+
+ui:
+  icon: gamepad-2                   # any icon from https://lucide.dev (kebab-case)
+  color: "#6366f1"                  # hex accent color for sidebar + card tint
+
+
+# ── NOTICES ────────────────────────────────────────────────────────────────────
+# One-time modal popups shown to the user at specific moments.
+
+notices:
+  - id: example_first_download
+    trigger: download_start         # fires just before the first download
+    once: true                      # show only once ever per user
+    style: info                     # info | warning | danger | success
+    title: "Heads Up"
+    message: "A browser window may open when downloading. This is normal — just close it and return to the app."
+
+
+# ── URLS ───────────────────────────────────────────────────────────────────────
+
+urls:
+  main: /                           # home / browse listing
+  page: /page/{page}/               # paginated listing — {page} is replaced automatically
+  search: /search/?q={query}        # search endpoint — {query} is replaced automatically
+  search_debounce_ms: 500           # ms to wait after typing before firing search
+  search_min_chars: 2               # minimum characters before search fires
+
+
+# ── RATE LIMITING ──────────────────────────────────────────────────────────────
+# Be polite to the server. All fields are optional but strongly recommended.
+
+rate_limit:
+  enabled: true
+  min_delay_ms: 800                 # minimum wait between requests
+  window_seconds: 10                # sliding window for burst detection
+  burst_threshold: 3                # requests allowed before throttling
+
+
+# ── SELECTORS ──────────────────────────────────────────────────────────────────
+# CSS selectors that extract data from each HTML page.
+# `container` selects the repeating game element; `fields` pick data from inside it.
+
+selectors:
+  main_page:
+    container: ".game-list .game-card"
+    fields:
+      title:
+        selector: "h2.game-title"
+      cover:
+        selector: "img.cover"
+        attribute: data-src          # use data-src for lazy-loaded images
+      link:
+        selector: "a.game-link"
+        attribute: href
+
+  # Optional — only needed if the search page has a different HTML structure.
+  search_page:
+    container: "div.search-result"
+    fields:
+      title:
+        selector: "h3.result-title"
+      cover:
+        selector: "img"
+        attribute: src
+      link:
+        selector: "a"
+        attribute: href
+
+
+# ── TRANSFORMATIONS ────────────────────────────────────────────────────────────
+# Clean and reshape field values. Chains run in order, top to bottom.
+
+transformations:
+  # Make relative image URLs absolute.
+  cover:
+    - type: url_normalize
+      base_url: https://example.com
+
+  # Make relative page links absolute.
+  link:
+    - type: url_normalize
+      base_url: https://example.com
+
+  # Strip a noisy suffix from every title.
+  title:
+    - type: strip_suffix
+      suffix: " - Example Site"
+    - type: trim
+
+
+# ── FIELD MAPPING ──────────────────────────────────────────────────────────────
+# Map your scraped field names to the standard names the app expects.
+
+field_mapping:
+  title:     title
+  cover_url: cover
+  game_url:  link
+
+
+# ── TAGS ───────────────────────────────────────────────────────────────────────
+# Small badge chips shown on each game card. Conditions are evaluated per item.
+
+tags:
+  pc:
+    label: "PC"
+    icon: monitor
+    color: "#64748b"
+    priority: 10                    # higher = shown first
+
+  early_access:
+    label: "Early Access"
+    icon: clock
+    color: "#f59e0b"
+    priority: 20
+    condition:
+      field: title
+      pattern: "early.access"       # regex matched against the field value
+
+
+# ── HOST CONFIGURATIONS ────────────────────────────────────────────────────────
+# Teaches the app how to download from specific file hosters.
+# The engine matches the download URL against `patterns` and uses the config.
+
+hosts:
+  hosts:
+
+    # WebView-based — hoster requires JavaScript (countdown timers, dynamic buttons…)
+    gofile:
+      patterns:
+        - "gofile.io"
+      display:
+        label: "GoFile"
+        icon: cloud-download
+        color: "#3b82f6"
+      download_method: webview
+      webview_config:
+        wait_for: "button.item_download"
+        wait_timeout_ms: 15000
+        click: "button.item_download"
+        intercept_download: true
+        download_url_pattern: "\.zip|\.rar|\.7z"
+
+    # API-based — extract file ID then build a direct download URL.
+    pixeldrain:
+      patterns:
+        - "pixeldrain.com"
+      display:
+        label: "PixelDrain"
+        icon: hard-drive
+        color: "#8b5cf6"
+      resolver:
+        steps:
+          - action: extract
+            method: regex
+            pattern: "/u/([a-zA-Z0-9]+)"
+            group: 1
+          - action: transform
+            transformations:
+              - type: template
+                template: "https://pixeldrain.com/api/file/{value}?download"
+
+    # Browser-only — can't be automated, open in system browser instead.
+    google_drive:
+      patterns:
+        - "drive.google.com"
+      display:
+        label: "Google Drive"
+        icon: hard-drive
+        color: "#4285f4"
+      browser_only: true
+      browser_only_reason: "Google Drive requires authentication in the browser."
+
+
+# ── LINK RESOLUTION ────────────────────────────────────────────────────────────
+# Resolve redirect URLs on the listing page before they are stored.
+# Useful when a site wraps links in /ext/?url=… or similar.
+
+link_resolution:
+  resolvers:
+    ext_redirect:
+      source_field: link
+      steps:
+        - action: fetch
+          follow_redirects: false
+          headers:
+            Referer: "https://example.com/"
+        - action: extract
+          method: regex
+          pattern: "location(?:\\.href)?\\s*=\\s*['\"]([^'\"]+)['\"]"
+          group: 1
+          fallback: ""
+
+
+# ── PATHS ──────────────────────────────────────────────────────────────────────
+# Named multi-step resolution paths. Referenced by `resolver:` in download buttons.
+
+paths:
+
+  # Follow a JavaScript redirect page and return the real URL.
+  follow_redirect:
+    steps:
+      - fetch:
+          follow_redirects: false
+          headers:
+            Referer: "https://example.com/"
+      - extract:
+          method: regex
+          pattern: "location(?:\\.href)?\\s*=\\s*['\"]([^'\"]+)['\"]"
+          group: 1
+      - return:
+          current: true
+    on_error:
+      - return_original
+
+  # Fetch a page that lists mirrors, then resolve each one.
+  mirror_page:
+    timeout_ms: 30000
+    steps:
+      - fetch:
+          follow_redirects: true
+      - extract_all:
+          selector: "div.mirror-option"
+          attribute: "data-url"
+          extract_meta:
+            label:
+              selector: ".mirror-name"
+          foreach:
+            path:
+              - detect_host:
+                  hosts:
+                    gofile.io:
+                      use: "paths.follow_redirect"
+                    pixeldrain.com:
+                      use: "paths.follow_redirect"
+                  default:
+                    use: "paths.follow_redirect"
+          aggregate:
+            mode: all
+    on_error:
+      - return_original
+
+
+# ── SETTINGS UI ────────────────────────────────────────────────────────────────
+# Interactive settings panel shown in the app's Settings screen for this source.
+
+setting_sections:
+
+  - id: account
+    title: "Account"
+    icon: user
+    description: "Log in to access download links."
+    components:
+
+      # Login button — hidden once the user is logged in.
+      - type: button_group
+        hide_when:
+          key: cookies
+          exists: true
+        buttons:
+          - label: "Login"
+            icon: log-in
+            color: "#6366f1"
+            action: open_webview
+            action_config:
+              url: /login
+              wait_for_cookie: session_id
+              close_on_domains:
+                - example.com
+              store_cookies_as: cookies
+
+      # Status card — shown once logged in.
+      - type: status_card
+        show_when:
+          key: cookies
+          exists: true
+        variant: success
+        icon: check-circle
+        text: "Logged in successfully."
+
+      # Logout button.
+      - type: button
+        show_when:
+          key: cookies
+          exists: true
+        label: "Log out"
+        icon: log-out
+        variant: danger
+        action: clear_storage
+        action_config:
+          keys:
+            - cookies
+          clear_webview: true
+
+  - id: options
+    title: "Options"
+    icon: settings
+    components:
+      - type: toggle
+        id: auto_resolve
+        label: "Auto-resolve redirect links"
+        description: "Resolve /ext/ redirect pages automatically."
+        default: true
+        store_as: auto_resolve
+
+
+# ── DETAIL PAGE ────────────────────────────────────────────────────────────────
+# Sections shown when a user clicks a game. Rendered in ascending `order`.
+
+detail_page:
+  sections:
+
+    # Full-width header: blurred background, title, badges.
+    - type: hero
+      order: 1
+      config:
+        background_image:
+          selector: "meta[property='og:image']"
+          attribute: content
+        title:
+          selector: "h1.game-title"
+        subtitle:
+          selector: ".release-date"
+        badges:
+          - label: "Version"
+            icon: package
+            selector: ".version b"
+            contains: "Version"
+            extract_after: ":"
+            style: primary
+
+    # YouTube trailer embed.
+    - type: video
+      order: 2
+      title: "Trailer"
+      icon: play-circle
+      config:
+        selector: "iframe[src*='youtube']"
+        attribute: src
+        transform: youtube_embed
+
+    # Description text block.
+    - type: text_content
+      order: 3
+      title: "Description"
+      icon: file-text
+      config:
+        selector: ".game-description"
+        extract: text
+        max_length: 2000
+
+    # Key-value metadata grid.
+    - type: metadata_grid
+      order: 4
+      title: "Game Information"
+      icon: info
+      config:
+        items:
+          - label: "Release Date"
+            icon: calendar
+            selector: ".release-date"
+
+          - label: "Developer"
+            icon: code
+            selector: ".developer"
+
+          - label: "Archive Password"
+            icon: lock
+            selector: ".archive-password"
+            contains: "Password"
+            extract_after: ":"
+            render_as: code
+            style: highlighted
+
+    # Numbered installation steps parsed from the page text.
+    - type: numbered_steps
+      order: 5
+      title: "Installation"
+      icon: list-ordered
+      config:
+        selector: ".install-guide"
+        extract_method: numbered_list
+        start_after: "Steps:"
+        end_before: "Notes:"
+
+    # Warning / info callout box.
+    - type: alert_box
+      order: 6
+      title: "Important Notes"
+      icon: alert-triangle
+      style: warning
+      config:
+        selector: ".notes ul"
+        items_selector: li
+
+    # Download buttons.
+    - type: download_buttons
+      order: 7
+      title: "Download"
+      icon: download
+      config:
+        buttons:
+
+          # Only match the GoFile anchor (there may be multiple /ext/ links).
+          - label: "GoFile"
+            selector: "a.download-btn[href*='/ext/']"
+            contains_text: "GoFile"   # only pick the anchor whose text is "GoFile"
+            icon: cloud-download
+            style: primary
+            action: open_link
+            resolve_link: true
+            smart_download: true
+
+          # Mirrors page — resolved via named path above.
+          - label: "All Mirrors"
+            selector: "a.mirrors-btn"
+            icon: server
+            style: secondary
+            action: open_link
+            resolver: mirror_page
+
+          # Locked button — not yet supported, shown grayed out.
+          - label: "RapidGator"
+            selector: "a[href*='rapidgator.net']"
+            icon: hard-drive
+            style: secondary
+            action: open_link
+            supported: false          # grayed out with "Not yet supported"
+
+          # Button with a confirmation modal before download.
+          - label: "GoFile (unstable)"
+            selector: "a.alt-download"
+            icon: alert-triangle
+            style: secondary
+            action: open_link
+            smart_download: true
+            warning: "This mirror is sometimes unreliable. If the download fails, try again."

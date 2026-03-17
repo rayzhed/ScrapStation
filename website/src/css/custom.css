@@ -1,0 +1,36 @@
+:root {
+  --ifm-color-primary: #00bcd4;
+  --ifm-color-primary-dark: #00aabf;
+  --ifm-color-primary-darker: #00a0b4;
+  --ifm-color-primary-darkest: #008494;
+  --ifm-color-primary-light: #0acee9;
+  --ifm-color-primary-lighter: #14d2ec;
+  --ifm-color-primary-lightest: #38dbf0;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #00e5ff;
+  --ifm-color-primary-dark: #00cfe6;
+  --ifm-color-primary-darker: #00c3d9;
+  --ifm-color-primary-darkest: #00a0b3;
+  --ifm-color-primary-light: #1ae8ff;
+  --ifm-color-primary-lighter: #26eaff;
+  --ifm-color-primary-lightest: #4deefd;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+  --ifm-background-color: #0d1117;
+  --ifm-background-surface-color: #161b22;
+  --ifm-navbar-background-color: #0d1117;
+  --ifm-footer-background-color: #0d1117;
+  --ifm-toc-border-color: #21262d;
+  --ifm-color-emphasis-300: #30363d;
+}
+
+[data-theme='dark'] .navbar {
+  border-bottom: 1px solid #21262d;
+}
+
+[data-theme='dark'] .footer {
+  border-top: 1px solid #21262d;
+}

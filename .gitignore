@@ -1,0 +1,73 @@
+# ============================================================
+# DEPENDENCIES
+# ============================================================
+node_modules/
+
+# ============================================================
+# BUILD OUTPUT
+# ============================================================
+/build
+/.svelte-kit
+/package
+
+# Rust build artifacts — 1-3 GB, never commit
+src-tauri/target/
+
+# Tauri generated files
+src-tauri/gen/
+
+# ============================================================
+# USER DATA
+# ============================================================
+# User source configs (personal, may contain private URLs)
+src-tauri/sources/*.yaml
+# Keep the generic reference/example files
+!src-tauri/sources/example*.yaml
+
+# User downloads folder
+src-tauri/downloads/
+
+# ============================================================
+# SECRETS & CREDENTIALS
+# ============================================================
+.env
+.env.*
+!.env.example
+
+# Settings file may contain session cookies
+src-tauri/user_settings.json
+
+# ============================================================
+# IDE & EDITOR
+# ============================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ============================================================
+# TOOL INTERNALS (never user content)
+# ============================================================
+.claude/
+
+# ============================================================
+# OS ARTIFACTS
+# ============================================================
+.DS_Store
+Thumbs.db
+nul
+
+# ============================================================
+# DOCS WEBSITE
+# ============================================================
+website/node_modules/
+website/build/
+website/.docusaurus/
+
+# ============================================================
+# DEBUG / TEMP
+# ============================================================
+src-tauri/debug_*.html
+src-tauri/*_no_results.html
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*

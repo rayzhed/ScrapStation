@@ -1,0 +1,1 @@
+pub mod generic_detail_extractor;
