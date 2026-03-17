@@ -9,7 +9,7 @@
 [![Release](https://img.shields.io/github/v/release/rayzhed/ScrapStation?style=flat-square&color=00e5ff&label=latest)](https://github.com/rayzhed/ScrapStation/releases/latest)
 [![License](https://img.shields.io/github/license/rayzhed/ScrapStation?style=flat-square&color=00e5ff)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue?style=flat-square&color=00e5ff)](https://github.com/rayzhed/ScrapStation/releases/latest)
-[![Discord](https://img.shields.io/discord/tr32SsezDA?style=flat-square&color=5865f2&label=Discord&logo=discord&logoColor=white)](https://discord.gg/tr32SsezDA)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865f2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/tr32SsezDA)
 [![CI](https://img.shields.io/github/actions/workflow/status/rayzhed/ScrapStation/ci.yml?style=flat-square&label=CI&color=00e5ff)](https://github.com/rayzhed/ScrapStation/actions)
 
 [**Download**](https://github.com/rayzhed/ScrapStation/releases/latest) · [**Documentation**](https://rayzhed.github.io/ScrapStation/) · [**Discord**](https://discord.gg/tr32SsezDA)
