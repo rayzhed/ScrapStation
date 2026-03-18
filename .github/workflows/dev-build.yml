@@ -1,0 +1,66 @@
+name: Dev Build
+
+# Runs on every push to dev, or manually from the Actions tab.
+# Produces a real installer but tagged as a pre-release so it never
+# shows up as the latest stable release.
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Delete existing dev-latest release (if any)
+        run: gh release delete dev-latest --yes --cleanup-tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Build and publish pre-release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: dev-latest
+          releaseName: "Dev Build (unstable)"
+          releaseBody: |
+            **This is an automated dev build — not a stable release.**
+
+            Built from the latest commit on the `dev` branch.
+            Use this to test fixes before they land in a numbered release.
+
+            Commit: ${{ github.sha }}
+          releaseDraft: false
+          prerelease: true
+          includeUpdaterJson: false
