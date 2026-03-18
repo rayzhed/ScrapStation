@@ -1,12 +1,13 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { animate } from 'motion';
-    import { Zap, Layers, Library, Download, Settings, Gamepad2, Plus, FileCode2, CheckCircle2, XCircle } from 'lucide-svelte';
+    import { Zap, Layers, Library, Download, Settings, Gamepad2, Plus, FileCode2, CheckCircle2, XCircle, Sparkles } from 'lucide-svelte';
     import * as LucideIcons from 'lucide-svelte';
     import SettingsManager from './SettingsManager.svelte';
     import { currentMode, navigateTo } from '$lib/stores/navigation';
     import { downloadStats } from '$lib/stores/downloads';
     import { libraryStats } from '$lib/stores/library';
+    import { updateState } from '$lib/stores/updater';
     import { sources, currentSource } from '$lib/stores/sources';
     import { loadGames } from '$lib/stores/games';
     import { invoke } from '@tauri-apps/api/core';
@@ -85,6 +86,7 @@
     }
 
     const navItems = [
+        { mode: 'updates'   as const, label: 'Updates',   icon: Sparkles },
         { mode: 'browse'    as const, label: 'Browse',    icon: Gamepad2 },
         { mode: 'library'   as const, label: 'Library',   icon: Library  },
         { mode: 'downloads' as const, label: 'Downloads', icon: Download },
@@ -137,7 +139,12 @@
                 />
                 <span style="flex: 1;">{item.label}</span>
 
-                {#if item.mode === 'library' && $libraryStats.gameCount > 0}
+                {#if item.mode === 'updates' && ($updateState.phase === 'available' || $updateState.phase === 'ready')}
+                    <span style="
+                        width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+                        background: {$updateState.phase === 'ready' ? '#32d74b' : '#0a84ff'};
+                    "></span>
+                {:else if item.mode === 'library' && $libraryStats.gameCount > 0}
                     <span class="sc-badge">{$libraryStats.gameCount}</span>
                 {:else if item.mode === 'downloads' && $downloadStats.pendingCount > 0}
                     <span class="sc-badge" style="

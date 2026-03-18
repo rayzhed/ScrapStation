@@ -42,6 +42,8 @@ pub fn run() {
 
     Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Initialize download tracker
             let download_tracker = DownloadTracker::new(app.handle().clone());
