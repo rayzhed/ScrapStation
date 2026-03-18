@@ -37,22 +37,32 @@ export const gameStatusMap = derived(
 
             let downloadProgress: number | undefined;
             let downloadSpeed: number | undefined;
+            let phase: GamePhase = game.status as GamePhase;
 
-            if (game.status === 'downloading' && game.download_ids.length > 0) {
-                const gameDls = game.download_ids
+            if (game.status === 'downloading') {
+                // Cross-check: only show 'downloading' if there are actual live downloads
+                // backing this game. Cancelled/removed downloads leave the library game
+                // stuck in 'downloading' otherwise.
+                const liveDls = game.download_ids
                     .map(id => $downloads.find(d => d.id === id))
-                    .filter((d): d is DownloadDisplay => d !== undefined);
+                    .filter((d): d is DownloadDisplay =>
+                        d !== undefined &&
+                        d.status !== 'cancelled' &&
+                        d.status !== 'failed'
+                    );
 
-                if (gameDls.length > 0) {
-                    const totalBytes = gameDls.reduce((s, d) => s + d.totalBytes, 0);
-                    const doneBytes = gameDls.reduce((s, d) => s + d.downloadedBytes, 0);
+                if (liveDls.length === 0) {
+                    phase = 'none';
+                } else {
+                    const totalBytes = liveDls.reduce((s, d) => s + d.totalBytes, 0);
+                    const doneBytes = liveDls.reduce((s, d) => s + d.downloadedBytes, 0);
                     downloadProgress = totalBytes > 0 ? (doneBytes / totalBytes) * 100 : 0;
-                    downloadSpeed = gameDls.reduce((s, d) => s + d.speed, 0);
+                    downloadSpeed = liveDls.reduce((s, d) => s + d.speed, 0);
                 }
             }
 
             map.set(key, {
-                phase: game.status as GamePhase,
+                phase,
                 libraryGame: game,
                 downloadProgress,
                 downloadSpeed,
