@@ -4,6 +4,7 @@
     import { games, loading, error, loadGames, searchGames, loadingSource } from '$lib/stores/games';
     import { initDownloadEvents } from '$lib/stores/downloads';
     import { initLibraryEvents } from '$lib/stores/library';
+    import { checkForUpdates } from '$lib/stores/updater';
     import { currentMode } from '$lib/stores/navigation';
     import { RotateCw, FolderOpen, Minus, Square, X as XIcon } from 'lucide-svelte';
     import { invoke } from '@tauri-apps/api/core';
@@ -16,6 +17,7 @@
     import GameDetailsPage from '$lib/components/GameDetailsPage.svelte';
     import DownloadsPage from '$lib/components/DownloadsPage.svelte';
     import LibraryPage from '$lib/components/LibraryPage.svelte';
+    import UpdatesPage from '$lib/components/UpdatesPage.svelte';
 
     const appWindow = getCurrentWindow();
     let isMaximized = false;
@@ -44,6 +46,8 @@
         await initDownloadEvents();
         await initLibraryEvents();
         await initSourceWatcher();
+        // Silent update check — result is reflected in updateState store
+        checkForUpdates().catch(() => {});
     });
 
     function handleSearch() {
@@ -60,8 +64,9 @@
     $: currentSourceName  = $sources.find(s => s.id === $currentSource)?.name || '';
     $: currentSourceColor = $sources.find(s => s.id === $currentSource)?.color || '#f5f5f7';
     $: loadingSourceName  = $sources.find(s => s.id === $loadingSource)?.name || $loadingSource;
-    $: pageTitle = $currentMode === 'browse' ? 'Browse'
-                 : $currentMode === 'library' ? 'Library'
+    $: pageTitle = $currentMode === 'updates'   ? 'Updates'
+                 : $currentMode === 'browse'    ? 'Browse'
+                 : $currentMode === 'library'   ? 'Library'
                  : 'Downloads';
 
     // Svelte action: Motion-powered page entrance
@@ -199,7 +204,9 @@
         <div class="flex-1 overflow-auto">
             {#key $currentMode}
                 <div use:pageIn>
-                    {#if $currentMode === 'browse'}
+                    {#if $currentMode === 'updates'}
+                        <UpdatesPage />
+                    {:else if $currentMode === 'browse'}
                         <GameGrid
                             games={$games}
                             loading={$loading}

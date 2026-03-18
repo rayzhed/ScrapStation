@@ -42,6 +42,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: ScrapStation ${{ github.ref_name }}
@@ -57,4 +59,4 @@ jobs:
             See the [commit history](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}) for changes in this release.
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: false
+          includeUpdaterJson: true
