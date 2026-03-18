@@ -1,8 +1,9 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, onDestroy } from 'svelte';
     import { RefreshCw, Download, ExternalLink, CheckCircle, Sparkles } from 'lucide-svelte';
     import { updateState, checkForUpdates, installUpdate, applyUpdate } from '$lib/stores/updater';
     import { invoke } from '@tauri-apps/api/core';
+    import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
     type Channel = 'stable' | 'dev';
 
@@ -21,10 +22,23 @@
         assets: GithubAsset[];
     }
 
+    interface InstallerProgress {
+        downloaded: number;
+        total: number | null;
+        percent: number | null;
+    }
+
     let channel: Channel = 'stable';
     let releases: GithubRelease[] = [];
     let loadingReleases = false;
     let fetchError = '';
+
+    // Track which release tag is currently being downloaded in-app
+    let installingTag: string | null = null;
+    let installerPercent: number | null = null;
+    let installerLaunching = false;
+
+    let unlistenProgress: UnlistenFn | null = null;
 
     const APP_VERSION = '0.1.0';
     const REPO = 'rayzhed/ScrapStation';
@@ -59,32 +73,63 @@
         invoke('open_url_in_browser', { url }).catch(() => {});
     }
 
-    /** Find the NSIS .exe installer in a release's assets, fall back to release page. */
-    function getInstallerUrl(release: GithubRelease): string {
-        const exe = release.assets.find(a =>
+    /** Find the NSIS .exe installer in a release's assets. Returns null if none found. */
+    function getInstallerAsset(release: GithubRelease): GithubAsset | null {
+        return release.assets.find(a =>
             a.name.endsWith('.exe') || a.name.endsWith('_x64-setup.exe') || a.name.includes('setup')
-        );
-        return exe ? exe.browser_download_url : release.html_url;
+        ) ?? null;
     }
 
-    function installVersion(release: GithubRelease) {
-        // For the latest available stable update we use the in-app updater (smooth UX).
-        // For everything else — including downgrades — we open the installer directly
-        // in the browser so the user can run it. The new installer handles closing the
-        // running app automatically.
+    async function installVersion(release: GithubRelease) {
+        // Use tauri-plugin-updater for the latest detected stable update
         const isLatestUpdate = channel === 'stable'
             && $updateState.phase === 'available'
             && ($updateState.version === release.tag_name || `v${$updateState.version}` === release.tag_name);
 
         if (isLatestUpdate) {
             installUpdate();
-        } else {
-            openInBrowser(getInstallerUrl(release));
+            return;
+        }
+
+        // For everything else, download the installer directly in-app
+        const asset = getInstallerAsset(release);
+        if (!asset) {
+            // No installer asset found — fall back to browser
+            openInBrowser(release.html_url);
+            return;
+        }
+
+        if (installingTag) return; // already downloading something
+
+        installingTag = release.tag_name;
+        installerPercent = 0;
+        installerLaunching = false;
+
+        // Listen for progress events
+        unlistenProgress = await listen<InstallerProgress>('installer-progress', (event) => {
+            installerPercent = event.payload.percent ?? null;
+        });
+
+        try {
+            await invoke('download_and_run_installer', { url: asset.browser_download_url });
+            // After invoke resolves the app exits — but set launching state just in case
+            installerLaunching = true;
+        } catch (e) {
+            installingTag = null;
+            installerPercent = null;
+            installerLaunching = false;
+        } finally {
+            unlistenProgress?.();
+            unlistenProgress = null;
         }
     }
 
     onMount(() => {
         fetchReleases();
+    });
+
+    onDestroy(() => {
+        unlistenProgress?.();
     });
 </script>
 
@@ -282,21 +327,43 @@
                     {/if}
 
                     {#if !isCurrent}
-                        <div class="mt-3 pt-3 flex items-center justify-between"
-                             style="border-top: 1px solid rgba(255,255,255,0.06);">
-                            <span class="text-[11px]" style="color: var(--label-quaternary);">
-                                {isAvailable ? 'Newer version' : 'Older version'} — installer will replace current
-                            </span>
-                            <button
-                                on:click={() => installVersion(release)}
-                                class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-[7px] transition-colors"
-                                style={isAvailable
-                                    ? 'background: #0a84ff; color: white;'
-                                    : 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--label-secondary);'}
-                            >
-                                <Download size={11} />
-                                {isAvailable ? 'Install update' : 'Install this version'}
-                            </button>
+                        {@const isDownloadingThis = installingTag === release.tag_name}
+                        <div class="mt-3 pt-3" style="border-top: 1px solid rgba(255,255,255,0.06);">
+                            {#if isDownloadingThis}
+                                <!-- Download progress -->
+                                <div class="flex flex-col gap-1.5">
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-[11px]" style="color: var(--label-tertiary);">
+                                            {installerLaunching ? 'Launching installer…' : `Downloading… ${installerPercent ?? 0}%`}
+                                        </span>
+                                        <span class="text-[11px] font-mono" style="color: var(--label-quaternary);">
+                                            {installerPercent ?? 0}%
+                                        </span>
+                                    </div>
+                                    <div class="h-1 rounded-full overflow-hidden" style="background: rgba(255,255,255,0.06);">
+                                        <div class="h-full rounded-full transition-all"
+                                             style="width: {installerPercent ?? 0}%; background: {isAvailable ? '#0a84ff' : 'rgba(255,255,255,0.4)'};">
+                                        </div>
+                                    </div>
+                                </div>
+                            {:else}
+                                <div class="flex items-center justify-between">
+                                    <span class="text-[11px]" style="color: var(--label-quaternary);">
+                                        {isAvailable ? 'Newer version' : 'Older version'} — installer will replace current
+                                    </span>
+                                    <button
+                                        on:click={() => installVersion(release)}
+                                        disabled={!!installingTag}
+                                        class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-[7px] transition-colors disabled:opacity-40"
+                                        style={isAvailable
+                                            ? 'background: #0a84ff; color: white;'
+                                            : 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--label-secondary);'}
+                                    >
+                                        <Download size={11} />
+                                        {isAvailable ? 'Install update' : 'Install this version'}
+                                    </button>
+                                </div>
+                            {/if}
                         </div>
                     {/if}
                 </div>

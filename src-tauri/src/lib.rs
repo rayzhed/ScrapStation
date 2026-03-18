@@ -195,6 +195,7 @@ pub fn run() {
             api::cache_missing_covers,
             api::update_game_cover_url,
             api::get_install_preflight,
+            api::download_and_run_installer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
