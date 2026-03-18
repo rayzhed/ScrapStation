@@ -1,10 +1,10 @@
 name: Dev Build
 
-# Runs on every push to dev, or manually from the Actions tab.
-# Produces a real installer but tagged as a pre-release so it never
-# shows up as the latest stable release.
 on:
   push:
+    branches:
+      - dev
+  pull_request:
     branches:
       - dev
   workflow_dispatch:
@@ -41,13 +41,33 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Delete existing dev-latest release (if any)
+      # ── PR: upload installer as artifact for testing before merge ──────────
+      - name: Build (PR test)
+        if: github.event_name == 'pull_request'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload PR build artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrapstation-pr-${{ github.event.pull_request.number }}-installer
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          retention-days: 7
+
+      # ── Push to dev: publish dev-latest pre-release ────────────────────────
+      - name: Delete existing dev-latest release
+        if: github.event_name != 'pull_request'
         run: gh release delete dev-latest --yes --cleanup-tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      - name: Build and publish pre-release
+      - name: Build and publish dev-latest pre-release
+        if: github.event_name != 'pull_request'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
