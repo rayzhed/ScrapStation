@@ -59,6 +59,49 @@ impl WebViewDownloader {
         Self { app_handle }
     }
 
+    /// Extract a filename from a Content-Disposition header value.
+    /// Handles both `filename="foo.rar"` and `filename*=UTF-8''foo.rar` forms.
+    fn filename_from_content_disposition(header: &str) -> Option<String> {
+        let lower = header.to_lowercase();
+        // RFC 5987 form takes priority: filename*=UTF-8''name.rar
+        if let Some(pos) = lower.find("filename*=") {
+            let rest = &header[pos + "filename*=".len()..];
+            let value = if let Some(p) = rest.find("''") { &rest[p + 2..] } else { rest };
+            let value = value.split(';').next().unwrap_or("").trim().trim_matches('"');
+            if !value.is_empty() {
+                return Some(
+                    urlencoding::decode(value)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| value.to_string()),
+                );
+            }
+        }
+        // Plain filename= form
+        if let Some(pos) = lower.find("filename=") {
+            let rest = &header[pos + "filename=".len()..];
+            let value = rest.split(';').next().unwrap_or("").trim().trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    /// Guess a file extension from a Content-Type header value.
+    fn ext_from_content_type(content_type: &str) -> Option<&'static str> {
+        let ct = content_type.split(';').next().unwrap_or("").trim().to_lowercase();
+        match ct.as_str() {
+            "application/x-rar-compressed"
+            | "application/vnd.rar"
+            | "application/rar" => Some("rar"),
+            "application/x-7z-compressed" => Some("7z"),
+            "application/zip" | "application/x-zip-compressed" => Some("zip"),
+            "application/gzip" | "application/x-gzip" => Some("gz"),
+            "application/x-tar" => Some("tar"),
+            _ => None,
+        }
+    }
+
     /// Try to get file size via HEAD request
     async fn get_content_length(url: &str) -> Option<u64> {
         let client = reqwest::Client::new();
@@ -143,8 +186,60 @@ impl WebViewDownloader {
         let total_size = response.content_length().unwrap_or(0);
         log::info!("[WebViewDownloader] Content-Length: {} bytes", total_size);
 
+        // Resolve the best filename from response headers.
+        // CDN URLs (e.g. trashbytes.net/dl/<token>) carry no extension in the path,
+        // so we check Content-Disposition first, then fall back to Content-Type.
+        let actual_destination: PathBuf = {
+            let headers = response.headers();
+
+            let cd_name = headers
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| Self::filename_from_content_disposition(s));
+
+            let parent = destination.parent().unwrap_or(destination.as_path());
+
+            if let Some(name) = cd_name {
+                log::info!("[WebViewDownloader] Filename from Content-Disposition: {}", name);
+                parent.join(name)
+            } else {
+                let current = destination.file_name().and_then(|n| n.to_str()).unwrap_or("download");
+                let has_ext = std::path::Path::new(current).extension().is_some();
+                if !has_ext {
+                    let ext = headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| Self::ext_from_content_type(s));
+                    if let Some(ext) = ext {
+                        let fixed = format!("{}.{}", current, ext);
+                        log::info!("[WebViewDownloader] Added extension from Content-Type: {}", fixed);
+                        parent.join(fixed)
+                    } else {
+                        destination.clone()
+                    }
+                } else {
+                    destination.clone()
+                }
+            }
+        };
+
+        // If the filename changed, update the tracker so the UI and resume logic use the right path
+        if actual_destination != *destination {
+            if let (Some(ref dl_id), Some(ref tracker)) = (&download_id, &tracker_state) {
+                let actual_name = actual_destination
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("download")
+                    .to_string();
+                let tracker_arc = tracker.inner().clone();
+                let t = tracker_arc.lock().await;
+                let _ = t.update_filename(dl_id, &actual_name).await;
+                let _ = t.update_file_path(dl_id, &actual_destination.to_string_lossy()).await;
+            }
+        }
+
         // Ensure parent directory exists
-        if let Some(parent) = destination.parent() {
+        if let Some(parent) = actual_destination.parent() {
             if !parent.exists() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -152,7 +247,7 @@ impl WebViewDownloader {
         }
 
         // Create the destination file
-        let mut file = std::fs::File::create(destination)
+        let mut file = std::fs::File::create(&actual_destination)
             .map_err(|e| format!("Failed to create file: {}", e))?;
 
         // Download with progress tracking
@@ -190,7 +285,7 @@ impl WebViewDownloader {
                         log::info!("[WebViewDownloader] Download cancelled: {}", dl_id);
                         drop(file); // Close file handle
                         // Delete partial file
-                        let _ = std::fs::remove_file(destination);
+                        let _ = std::fs::remove_file(&actual_destination);
                         return Err("CANCELLED".to_string());
                     }
                     DownloadSignal::Continue => {}
@@ -238,7 +333,7 @@ impl WebViewDownloader {
 
         log::info!("[WebViewDownloader] Download complete: {} bytes", downloaded);
 
-        Ok((destination.clone(), downloaded))
+        Ok((actual_destination, downloaded))
     }
 
     /// Attempt to get download URL using an invisible WebView
