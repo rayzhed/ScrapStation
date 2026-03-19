@@ -18,7 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Check for -dev suffix
         id: ver
@@ -46,5 +46,6 @@ jobs:
           git add package.json
           git commit -m "chore: release v${{ steps.ver.outputs.version }}"
           git tag "v${{ steps.ver.outputs.version }}"
+          git remote set-url origin https://x-access-token:${{ secrets.RELEASE_PAT }}@github.com/${{ github.repository }}.git
           git push
           git push --tags
