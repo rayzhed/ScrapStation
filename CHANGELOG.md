@@ -7,6 +7,20 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [0.1.2] — 2026-03-19
+
+### Added
+- Auto-load `.env` via `dotenv-cli` so local builds pick up signing keys automatically
+
+### Fixed
+- Updater artifacts now generated correctly (`createUpdaterArtifacts: true`) so `latest.json` is uploaded to releases
+- Release version and newer/older label now read dynamically from the installed app instead of being hardcoded
+- New signing key pair — previous key was unrecoverable
+
+[0.1.2]: https://github.com/rayzhed/ScrapStation/compare/v0.1.1...v0.1.2
+
+---
+
 ## [0.1.1] — 2026-03-19
 
 ### Added

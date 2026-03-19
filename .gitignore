@@ -33,6 +33,8 @@ src-tauri/downloads/
 .env
 .env.*
 !.env.example
+*.key
+*.key.pub
 
 # Settings file may contain session cookies
 src-tauri/user_settings.json
