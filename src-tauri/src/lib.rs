@@ -42,6 +42,8 @@ pub fn run() {
 
     Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Initialize download tracker
             let download_tracker = DownloadTracker::new(app.handle().clone());
@@ -193,6 +195,7 @@ pub fn run() {
             api::cache_missing_covers,
             api::update_game_cover_url,
             api::get_install_preflight,
+            api::download_and_run_installer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
