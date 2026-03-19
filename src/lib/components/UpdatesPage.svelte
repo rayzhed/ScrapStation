@@ -3,6 +3,7 @@
     import { RefreshCw, Download, ExternalLink, CheckCircle, Sparkles } from 'lucide-svelte';
     import { updateState, checkForUpdates, installUpdate, applyUpdate } from '$lib/stores/updater';
     import { invoke } from '@tauri-apps/api/core';
+    import { getVersion } from '@tauri-apps/api/app';
     import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
     type Channel = 'stable' | 'dev';
@@ -40,7 +41,8 @@
 
     let unlistenProgress: UnlistenFn | null = null;
 
-    const APP_VERSION = '0.1.0';
+    let APP_VERSION = '';
+    getVersion().then(v => APP_VERSION = v);
     const REPO = 'rayzhed/ScrapStation';
 
     async function fetchReleases() {
@@ -276,6 +278,8 @@
             {#each releases as release}
                 {@const isCurrent = release.tag_name === `v${APP_VERSION}` || release.tag_name === APP_VERSION}
                 {@const isAvailable = channel === 'stable' && $updateState.phase === 'available' && $updateState.version && (release.tag_name === `v${$updateState.version}` || release.tag_name === $updateState.version)}
+                {@const releaseVer = release.tag_name.replace(/^v/, '')}
+                {@const isNewer = APP_VERSION ? releaseVer.localeCompare(APP_VERSION, undefined, { numeric: true }) > 0 : false}
                 <div class="rounded-[10px] p-4 transition-colors"
                      style="
                         background: rgba(255,255,255,0.03);
@@ -349,7 +353,7 @@
                             {:else}
                                 <div class="flex items-center justify-between">
                                     <span class="text-[11px]" style="color: var(--label-quaternary);">
-                                        {isAvailable ? 'Newer version' : 'Older version'} — installer will replace current
+                                        {isNewer ? 'Newer version' : 'Older version'} — installer will replace current
                                     </span>
                                     <button
                                         on:click={() => installVersion(release)}
