@@ -1,0 +1,50 @@
+name: Prepare Release
+
+# Runs after every merge to main.
+# If the version has a -dev suffix, strips it, commits, and tags — triggering the release build.
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  strip-dev:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for -dev suffix
+        id: ver
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *-dev* ]]; then
+            CLEAN="${VERSION%-dev*}"
+            echo "has_dev=true"  >> $GITHUB_OUTPUT
+            echo "version=$CLEAN" >> $GITHUB_OUTPUT
+          else
+            echo "has_dev=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Strip -dev from package.json
+        if: steps.ver.outputs.has_dev == 'true'
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          sed -i "s/\"version\": \"[^\"]*-dev[^\"]*\"/\"version\": \"$V\"/" package.json
+
+      - name: Commit, tag, and push
+        if: steps.ver.outputs.has_dev == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore: release v${{ steps.ver.outputs.version }}"
+          git tag "v${{ steps.ver.outputs.version }}"
+          git push
+          git push --tags

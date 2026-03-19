@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
-    import { RefreshCw, Download, ExternalLink, CheckCircle, Sparkles } from 'lucide-svelte';
+    import { RefreshCw, Download, ExternalLink, CheckCircle, Sparkles, ChevronDown } from 'lucide-svelte';
+    import { marked } from 'marked';
     import { updateState, checkForUpdates, installUpdate, applyUpdate } from '$lib/stores/updater';
     import { invoke } from '@tauri-apps/api/core';
     import { getVersion } from '@tauri-apps/api/app';
@@ -40,6 +41,31 @@
     let installerLaunching = false;
 
     let unlistenProgress: UnlistenFn | null = null;
+    let expandedReleases = new Set<string>();
+    let overflowingReleases = new Set<string>();
+
+    function toggleExpand(tag: string) {
+        if (expandedReleases.has(tag)) {
+            expandedReleases.delete(tag);
+        } else {
+            expandedReleases.add(tag);
+        }
+        expandedReleases = expandedReleases;
+    }
+
+    function detectOverflow(node: HTMLElement, tag: string) {
+        requestAnimationFrame(() => {
+            if (node.scrollHeight > node.clientHeight) {
+                overflowingReleases.add(tag);
+                overflowingReleases = overflowingReleases;
+            }
+        });
+    }
+
+    function renderChangelog(body: string): string {
+        const changelog = body.split('\n---\n')[0].trim();
+        return marked.parse(changelog) as string;
+    }
 
     let APP_VERSION = '';
     getVersion().then(v => APP_VERSION = v);
@@ -139,14 +165,8 @@
     <!-- Header -->
     <div class="flex items-center justify-between px-6 py-5 border-b"
          style="border-color: var(--border-subtle); flex-shrink: 0;">
-        <div>
-            <h1 class="text-sm font-bold tracking-wide" style="color: var(--label-primary); letter-spacing: 0.06em;">
-                UPDATES
-            </h1>
-            <p class="text-[11px] mt-0.5" style="color: var(--label-tertiary);">
-                Current version: <span class="font-mono">v{APP_VERSION}</span>
-            </p>
-        </div>
+
+        <span class="font-mono text-[11px]" style="color: var(--label-quaternary);">v{APP_VERSION}</span>
 
         <!-- Channel toggle -->
         <div class="flex items-center p-0.5 rounded-[8px]"
@@ -324,10 +344,24 @@
                     </div>
 
                     {#if release.body}
-                        <p class="text-[11px] leading-relaxed whitespace-pre-line line-clamp-6"
-                           style="color: var(--label-tertiary);">
-                            {release.body}
-                        </p>
+                        {@const expanded = expandedReleases.has(release.tag_name)}
+                        {@const overflowing = overflowingReleases.has(release.tag_name)}
+                        <div class="release-body text-[11px] leading-relaxed"
+                             class:line-clamp-4={!expanded}
+                             style="color: var(--label-tertiary);"
+                             use:detectOverflow={release.tag_name}>
+                            {@html renderChangelog(release.body)}
+                        </div>
+                        {#if overflowing || expanded}
+                            <button
+                                on:click={() => toggleExpand(release.tag_name)}
+                                class="flex items-center gap-1 mt-1 transition-opacity hover:opacity-70"
+                                style="color: var(--label-quaternary);"
+                            >
+                                <span class="text-[10px]">{expanded ? 'Show less' : 'Show more'}</span>
+                                <ChevronDown size={10} style="transition: transform 0.2s; transform: rotate({expanded ? '180deg' : '0deg'});" />
+                            </button>
+                        {/if}
                     {/if}
 
                     {#if !isCurrent}
@@ -375,3 +409,12 @@
         {/if}
     </div>
 </div>
+
+<style>
+    .release-body :global(h2) { font-size: 11px; font-weight: 700; color: var(--label-secondary); margin: 8px 0 4px; letter-spacing: 0.04em; text-transform: uppercase; }
+    .release-body :global(h3) { font-size: 11px; font-weight: 600; color: var(--label-secondary); margin: 6px 0 3px; }
+    .release-body :global(ul) { padding-left: 14px; margin: 2px 0; }
+    .release-body :global(li) { margin: 2px 0; list-style: disc; }
+    .release-body :global(p)  { margin: 3px 0; }
+    .release-body :global(code) { font-family: monospace; font-size: 10px; background: rgba(255,255,255,0.07); padding: 1px 4px; border-radius: 3px; }
+</style>

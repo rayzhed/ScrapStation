@@ -51,13 +51,6 @@
 
 <div class="flex flex-col h-full">
     <!-- Header -->
-    <div class="flex items-center px-6 py-5 border-b flex-shrink-0"
-         style="border-color: var(--border-subtle);">
-        <h1 class="text-sm font-bold tracking-wide" style="color: var(--label-primary); letter-spacing: 0.06em;">
-            ABOUT
-        </h1>
-    </div>
-
     <!-- Body -->
     <div class="flex-1 flex gap-px overflow-hidden" style="background: var(--border-subtle);">
 
