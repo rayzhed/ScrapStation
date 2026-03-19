@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { animate } from 'motion';
-    import { Zap, Layers, Library, Download, Settings, Gamepad2, Plus, FileCode2, CheckCircle2, XCircle, Sparkles } from 'lucide-svelte';
+    import { Zap, Layers, Library, Download, Settings, Gamepad2, Plus, FileCode2, CheckCircle2, XCircle, Sparkles, Info } from 'lucide-svelte';
     import * as LucideIcons from 'lucide-svelte';
     import SettingsManager from './SettingsManager.svelte';
     import { currentMode, navigateTo } from '$lib/stores/navigation';
@@ -224,11 +224,15 @@
         {/if}
     </div>
 
-    <!-- Settings -->
+    <!-- Settings + About -->
     <div style="border-top: 1px solid rgba(255,255,255,0.18);">
         <button on:click={() => showSettings = true} class="sc-nav-item">
             <Settings size={14} strokeWidth={1.75} style="flex-shrink: 0; color: var(--label-tertiary);" />
             <span>Settings</span>
+        </button>
+        <button on:click={() => navigateTo('about')} class="sc-nav-item {$currentMode === 'about' ? 'active' : ''}">
+            <Info size={14} strokeWidth={$currentMode === 'about' ? 2 : 1.75} style="flex-shrink: 0; color: {$currentMode === 'about' ? 'var(--label-primary)' : 'var(--label-tertiary)'};" />
+            <span>About</span>
         </button>
     </div>
 </aside>

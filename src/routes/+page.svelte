@@ -18,6 +18,7 @@
     import DownloadsPage from '$lib/components/DownloadsPage.svelte';
     import LibraryPage from '$lib/components/LibraryPage.svelte';
     import UpdatesPage from '$lib/components/UpdatesPage.svelte';
+    import AboutPage from '$lib/components/AboutPage.svelte';
 
     const appWindow = getCurrentWindow();
     let isMaximized = false;
@@ -67,6 +68,7 @@
     $: pageTitle = $currentMode === 'updates'   ? 'Updates'
                  : $currentMode === 'browse'    ? 'Browse'
                  : $currentMode === 'library'   ? 'Library'
+                 : $currentMode === 'about'     ? 'About'
                  : 'Downloads';
 
     // Svelte action: Motion-powered page entrance
@@ -201,9 +203,9 @@
         </div>
 
         <!-- Page content -->
-        <div class="flex-1 overflow-auto">
+        <div class="flex-1 overflow-hidden">
             {#key $currentMode}
-                <div use:pageIn>
+                <div use:pageIn class="h-full">
                     {#if $currentMode === 'updates'}
                         <UpdatesPage />
                     {:else if $currentMode === 'browse'}
@@ -219,6 +221,8 @@
                         <LibraryPage />
                     {:else if $currentMode === 'downloads'}
                         <DownloadsPage />
+                    {:else if $currentMode === 'about'}
+                        <AboutPage />
                     {/if}
                 </div>
             {/key}
