@@ -68,6 +68,6 @@ jobs:
             Download and run the `.exe` installer (NSIS) or the `.msi` installer below.
 
             > Windows may show a SmartScreen warning on first run — click "More info" → "Run anyway".
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

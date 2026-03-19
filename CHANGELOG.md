@@ -7,6 +7,29 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [0.1.3] — 2026-03-19
+
+### Added
+- Markdown rendering for changelogs in the Updates page
+- Overflow-aware "Show more / Show less" accordion on long changelogs
+- Pulse animation on the update dot in the sidebar (green = ready to install, blue = available)
+- Version display in the Updates page header
+- `package.json` as the single source of truth for the app version
+
+### Changed
+- Removed redundant section headers from About and Updates pages
+- Dev builds now publish NSIS only (MSI rejects `-dev` version suffix)
+- Release bodies now show the actual changelog instead of installation instructions
+- CI skips the Windows build for docs and workflow-only commits
+
+### Fixed
+- Signing keys now passed correctly to dev-build CI workflow
+- Version and newer/older label in Updates page now read dynamically from the installed app
+
+[0.1.3]: https://github.com/rayzhed/ScrapStation/compare/v0.1.2...v0.1.3
+
+---
+
 ## [0.1.2] — 2026-03-19
 
 ### Added
