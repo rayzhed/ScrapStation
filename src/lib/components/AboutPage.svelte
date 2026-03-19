@@ -1,9 +1,11 @@
 <script lang="ts">
     import { Zap, Github, ExternalLink, Heart, Bug, Star } from 'lucide-svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { getVersion } from '@tauri-apps/api/app';
     import { navigateTo } from '$lib/stores/navigation';
 
-    const APP_VERSION   = '0.1.0';
+    let APP_VERSION = '...';
+    getVersion().then(v => APP_VERSION = v);
     const REPO_URL      = 'https://github.com/rayzhed/ScrapStation';
     const ISSUES_URL    = 'https://github.com/rayzhed/ScrapStation/issues';
     const GITHUB_AVATAR = 'https://github.com/rayzhed.png';

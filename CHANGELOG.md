@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [0.1.1] — 2026-03-19
+
+### Added
+- About page — full-panel view with app identity, tech stack, author credit, license summary, and legal disclosures
+- In-app installer — download and run any release version directly without leaving the app, with live progress bar
+- Auto-updater — silent update check on launch with dedicated Updates page for upgrade/downgrade to any version
+- Custom noncommercial license (ScrapStation License v1.0) replacing MIT
+
+### Fixed
+- File downloads now correctly resolve filenames from `Content-Disposition` and `Content-Type` headers
+- Stale "downloading" badge no longer lingers after all downloads complete
+- Blob URLs now allowed in CSP so game cover images render correctly in production builds
+- `process:allow-restart` capability name corrected (was `allow-relaunch`)
+- Version alignment between `tauri-plugin-updater` and `@tauri-apps/plugin-updater`
+
+[0.1.1]: https://github.com/rayzhed/ScrapStation/compare/v0.1.0...v0.1.1
+
+---
+
 ## [0.1.0] — 2026-03-17
 
 ### Added
