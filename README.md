@@ -11,7 +11,7 @@
 [![Stars](https://img.shields.io/github/stars/rayzhed/ScrapStation?style=for-the-badge&logo=github&color=00e5ff&logoColor=black)](https://github.com/rayzhed/ScrapStation/stargazers)
 
 [![Platform](https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/rayzhed/ScrapStation/releases/latest)
-[![License](https://img.shields.io/github/license/rayzhed/ScrapStation?style=for-the-badge&color=00e5ff&logoColor=black)](LICENSE)
+[![License](https://img.shields.io/badge/License-ScrapStation%20NC-00e5ff?style=for-the-badge&logoColor=black)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/rayzhed/ScrapStation/ci.yml?style=for-the-badge&label=build&logo=githubactions&logoColor=white)](https://github.com/rayzhed/ScrapStation/actions)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865f2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tr32SsezDA)
 
@@ -128,10 +128,10 @@ See [**CONTRIBUTING.md**](CONTRIBUTING.md) for the branch model, commit style, a
 
 `main` → stable releases only
 `dev` → active development
-`feature/*` → branch from `dev`, PR back to `dev`
+`feat/*`, `fix/*`, `chore/*` → branch from `dev`, PR back to `dev`
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+ScrapStation License v1.0 (custom non-commercial) — see [LICENSE](LICENSE)
