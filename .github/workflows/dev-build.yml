@@ -4,9 +4,23 @@ on:
   push:
     branches:
       - dev
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'website/**'
+      - '.gitattributes'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
   pull_request:
     branches:
       - dev
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'website/**'
+      - '.gitattributes'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
   workflow_dispatch:
 
 jobs:
@@ -49,6 +63,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          args: --bundles nsis
 
       - name: Upload PR build artifact
         if: github.event_name == 'pull_request'
@@ -88,3 +104,4 @@ jobs:
           releaseDraft: false
           prerelease: true
           includeUpdaterJson: false
+          args: --bundles nsis

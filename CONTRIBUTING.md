@@ -9,8 +9,9 @@ Thanks for your interest in contributing. Here's everything you need to know.
 ```
 main        ← stable releases only — never commit directly
 dev         ← integration branch — merge features here
-feature/*   ← new features        (branch from dev)
+feat/*      ← new features        (branch from dev)
 fix/*       ← bug fixes           (branch from dev)
+chore/*     ← maintenance, deps, CI, config (branch from dev)
 docs/*      ← documentation only  (branch from dev)
 ```
 
@@ -20,6 +21,24 @@ docs/*      ← documentation only  (branch from dev)
 2. Work on your branch
 3. Open a PR → `dev`
 4. Once `dev` is tested and stable → PR `dev` → `main` → tag a release
+
+---
+
+## Versioning conventions
+
+| Branch / context | Version format      | Example        |
+|-----------------|---------------------|----------------|
+| `main`          | `x.y.z`             | `0.1.3`        |
+| `dev`           | `x.y.z-dev`         | `0.1.3-dev`    |
+| `feat/*`        | inherits from `dev` | `0.1.3-dev`    |
+| `fix/*`         | inherits from `dev` | `0.1.3-dev`    |
+| `chore/*`       | inherits from `dev` | `0.1.3-dev`    |
+
+**Rules:**
+- Immediately after merging a release to `main`, bump `dev` to the next patch version with `-dev` suffix
+- Never change the version on feature/fix/chore branches — they inherit from `dev`
+- Strip `-dev` only when preparing a release PR from `dev` → `main`
+- Version must be kept in sync across `tauri.conf.json`, `Cargo.toml`, and `package.json`
 
 ---
 

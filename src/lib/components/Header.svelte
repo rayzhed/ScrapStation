@@ -140,10 +140,13 @@
                 <span style="flex: 1;">{item.label}</span>
 
                 {#if item.mode === 'updates' && ($updateState.phase === 'available' || $updateState.phase === 'ready')}
-                    <span style="
-                        width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
-                        background: {$updateState.phase === 'ready' ? '#32d74b' : '#0a84ff'};
-                    "></span>
+                    {@const dotColor = $updateState.phase === 'ready' ? '#32d74b' : '#0a84ff'}
+                    <span class="relative flex flex-shrink-0" style="width: 10px; height: 10px;">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-60"
+                              style="background: {dotColor};"></span>
+                        <span class="relative inline-flex rounded-full m-auto"
+                              style="width: 6px; height: 6px; background: {dotColor};"></span>
+                    </span>
                 {:else if item.mode === 'library' && $libraryStats.gameCount > 0}
                     <span class="sc-badge">{$libraryStats.gameCount}</span>
                 {:else if item.mode === 'downloads' && $downloadStats.pendingCount > 0}

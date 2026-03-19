@@ -38,6 +38,17 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Extract changelog for this version
+        id: changelog
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found && /^---$/{exit} found{print}" CHANGELOG.md)
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -48,15 +59,15 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: ScrapStation ${{ github.ref_name }}
           releaseBody: |
+            ${{ steps.changelog.outputs.notes }}
+
+            ---
+
             ## Installation
 
             Download and run the `.exe` installer (NSIS) or the `.msi` installer below.
 
             > Windows may show a SmartScreen warning on first run — click "More info" → "Run anyway".
-
-            ## What's new
-
-            See the [commit history](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}) for changes in this release.
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true

@@ -1,6 +1,6 @@
 {
   "name": "scrapstation",
-  "version": "0.1.2",
+  "version": "0.1.3-dev",
   "description": "",
   "type": "module",
   "scripts": {
@@ -18,6 +18,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.0",
     "lucide-svelte": "^0.561.0",
+    "marked": "^17.0.4",
     "motion": "^12.36.0"
   },
   "devDependencies": {
