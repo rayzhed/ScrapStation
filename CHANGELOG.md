@@ -20,6 +20,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - **Repair Library scans all known locations** — Recovery → Fix Library now walks every detected library folder (active + default AppData + extras + all drives), recovering games from any previously active root
 - **Fix broken paths now multi-root aware** — Recovery → Fix broken paths resolves legacy relative paths against every known library folder, finding the correct one instead of defaulting to the current root
 - `get_known_library_locations`, `add_library_location`, `remove_library_location` Tauri commands
+- **Download location picker** in the install preflight modal — "Save archive to" Change button shows known app-managed locations as a dropdown; Browse fallback still available for custom paths
+- **Install location auto-linked** to download location — changing the download drive automatically targets the matching library folder on that drive; overridable via Advanced
+- **Enlarged install preflight modal** — wider (`max-w-2xl`), larger text and padding, full paths shown without truncation, scrollable body with pinned header and action bar
 
 ### Changed
 - `add_game_to_library` now stores the **absolute install path** at creation time so games remain locatable when the data root is changed later
@@ -27,6 +30,8 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - `repair_library` now stores absolute paths for recovered entries (was relative, which broke after root changes)
 - Settings left nav active state is now tracked via IntersectionObserver so it follows the scroll position
 - Library location entries are marked `removable: false` for auto-detected and system entries — only user-added extras show the remove button
+- Settings → Storage data root "Browse" button replaced with a "Change" dropdown listing known locations, with Browse fallback
+- `downloadDir` and `installDir` now forwarded through both smart and resolved download paths (previously only smart carried them)
 
 ### Fixed
 - Games installed on a previously active drive (e.g. F:) no longer disappear from the library after the data root is changed; running Repair Library recovers them automatically
@@ -34,6 +39,8 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - Settings modal `overflow: hidden` was clipping the Move dropdown; panel now uses explicit border-radius on the accent bar instead
 - Drive badge `{@const}` was placed outside an `{#each}` child — moved to the correct scope
 - Path comparison in `get_known_library_locations` now normalises case and trailing separators on Windows to avoid duplicates
+- Install preflight modal Advanced accordion `overflow: hidden` was clipping the install location dropdown
+- Preflight modal scroll container switches to `overflow: visible` while a picker is open so dropdowns are never clipped
 
 [0.1.4]: https://github.com/rayzhed/ScrapStation/compare/v0.1.3...v0.1.4
 
