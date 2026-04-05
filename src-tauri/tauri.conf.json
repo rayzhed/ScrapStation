@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ScrapStation",
   "version": "../package.json",
-  "identifier": "com.scrapstation.app",
+  "identifier": "ScrapStation",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",

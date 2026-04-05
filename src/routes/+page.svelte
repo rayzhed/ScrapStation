@@ -4,11 +4,13 @@
     import { games, loading, error, loadGames, searchGames, loadingSource } from '$lib/stores/games';
     import { initDownloadEvents } from '$lib/stores/downloads';
     import { initLibraryEvents } from '$lib/stores/library';
+    import { loadStorageConfig } from '$lib/stores/appSettings';
     import { checkForUpdates } from '$lib/stores/updater';
     import { currentMode } from '$lib/stores/navigation';
     import { RotateCw, FolderOpen, Minus, Square, X as XIcon } from 'lucide-svelte';
     import { invoke } from '@tauri-apps/api/core';
     import { getCurrentWindow } from '@tauri-apps/api/window';
+    import { getVersion } from '@tauri-apps/api/app';
     import { animate } from 'motion';
 
     import Header from '$lib/components/Header.svelte';
@@ -19,9 +21,11 @@
     import LibraryPage from '$lib/components/LibraryPage.svelte';
     import UpdatesPage from '$lib/components/UpdatesPage.svelte';
     import AboutPage from '$lib/components/AboutPage.svelte';
+    import SettingsManager from '$lib/components/SettingsManager.svelte';
 
     const appWindow = getCurrentWindow();
     let isMaximized = false;
+    let isDevBuild = false;
 
     async function refreshMaximized() { isMaximized = await appWindow.isMaximized(); }
     async function minimize()         { await appWindow.minimize(); }
@@ -43,10 +47,13 @@
     }
 
     onMount(async () => {
+        const v = await getVersion().catch(() => '');
+        isDevBuild = v.includes('-dev');
         await loadAvailableSources();
         await initDownloadEvents();
         await initLibraryEvents();
         await initSourceWatcher();
+        loadStorageConfig().catch(() => {});
         // Silent update check — result is reflected in updateState store
         checkForUpdates().catch(() => {});
     });
@@ -68,6 +75,7 @@
     $: pageTitle = $currentMode === 'updates'   ? 'Updates'
                  : $currentMode === 'browse'    ? 'Browse'
                  : $currentMode === 'library'   ? 'Library'
+                 : $currentMode === 'settings'  ? 'Settings'
                  : $currentMode === 'about'     ? 'About'
                  : 'Downloads';
 
@@ -85,6 +93,7 @@
 <!-- ── Titlebar ────────────────────────────────────────────────────────────── -->
 <div
     class="fixed top-0 left-0 right-0 z-[200] flex items-stretch"
+    class:dev-titlebar={isDevBuild}
     style="
         height: 32px;
         background: var(--bg-sidebar);
@@ -94,6 +103,16 @@
 >
     <!-- Drag fill -->
     <div class="flex-1" data-tauri-drag-region></div>
+
+    <!-- Dev mode label -->
+    {#if isDevBuild}
+        <div
+            class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none"
+            style="font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(245,245,247,0.3);"
+        >
+            Development Build
+        </div>
+    {/if}
 
     <!-- Window controls — Windows style -->
     <div class="flex items-stretch" data-tauri-drag-region="false">
@@ -205,7 +224,7 @@
         <!-- Page content -->
         <div class="flex-1 overflow-hidden">
             {#key $currentMode}
-                <div use:pageIn class="h-full">
+                <div use:pageIn class="h-full overflow-y-auto">
                     {#if $currentMode === 'updates'}
                         <UpdatesPage />
                     {:else if $currentMode === 'browse'}
@@ -223,6 +242,8 @@
                         <DownloadsPage />
                     {:else if $currentMode === 'about'}
                         <AboutPage />
+                    {:else if $currentMode === 'settings'}
+                        <SettingsManager />
                     {/if}
                 </div>
             {/key}
@@ -238,3 +259,26 @@
         />
     {/if}
 </main>
+
+<style>
+    .dev-titlebar::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: repeating-linear-gradient(
+            -45deg,
+            transparent 0px,
+            transparent 16px,
+            rgba(255, 255, 255, 0.055) 16px,
+            rgba(255, 255, 255, 0.055) 32px
+        );
+        background-size: 45.3px 45.3px;
+        animation: stripe-scroll 1.4s linear infinite;
+    }
+
+    @keyframes stripe-scroll {
+        from { background-position: 0 0; }
+        to   { background-position: 45.3px 0; }
+    }
+</style>

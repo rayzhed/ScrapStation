@@ -39,6 +39,15 @@ pub struct DownloadEntry {
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
     pub file_path: Option<String>,
+    /// Custom download directory chosen by the user for this download.
+    /// When set, file_path is a filename relative to this directory.
+    /// When None, file_path is relative to the default download folder.
+    #[serde(default)]
+    pub download_dir: Option<String>,
+    /// Custom install directory chosen by the user. When set, the game will be
+    /// extracted to `install_dir/<slug>/game` instead of the default library folder.
+    #[serde(default)]
+    pub install_dir: Option<String>,
     pub error: Option<String>,
     pub started_at: u64,
     pub completed_at: Option<u64>,
@@ -95,33 +104,59 @@ impl DownloadTracker {
         let db: DownloadsDb = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse downloads db: {}", e))?;
 
+        let mut needs_migration_save = false;
+        {
         let mut downloads = self.downloads.write().await;
-        for entry in db.downloads {
-            let mut entry = entry;
+            for entry in db.downloads {
+                let mut entry = entry;
 
-            // Completed entries whose file no longer exists on disk are ghosts — drop them.
-            if entry.status == DownloadStatus::Completed {
-                let file_exists = entry.file_path.as_ref()
-                    .map(|p| std::path::Path::new(p).exists())
-                    .unwrap_or(false);
-                if !file_exists {
-                    log::info!("[DownloadTracker] Dropping ghost completed download '{}' (file missing)", entry.id);
-                    continue;
+                // ── Migrate absolute file_path → relative (just filename) ──────────
+                if let Some(fp) = &entry.file_path.clone() {
+                    let path = PathBuf::from(fp);
+                    if path.is_absolute() {
+                        if let Some(filename) = path.file_name() {
+                            entry.file_path = Some(filename.to_string_lossy().to_string());
+                            needs_migration_save = true;
+                        }
+                    }
                 }
+
+                // Completed entries whose file no longer exists on disk are ghosts — drop them.
+                if entry.status == DownloadStatus::Completed {
+                    let file_exists = resolve_file_path(&entry, &self.app_handle)
+                        .map(|p| p.exists())
+                        .unwrap_or(false);
+                    if !file_exists {
+                        log::info!("[DownloadTracker] Dropping ghost completed download '{}' (file missing)", entry.id);
+                        continue;
+                    }
+                }
+
+                // Reset in-flight statuses on startup.
+                match entry.status {
+                    DownloadStatus::Downloading => entry.status = DownloadStatus::Paused,
+                    // Queued items lose their position across restarts — treat as paused.
+                    DownloadStatus::Queued | DownloadStatus::Pending => entry.status = DownloadStatus::Paused,
+                    _ => {}
+                }
+
+                downloads.insert(entry.id.clone(), entry);
             }
 
-            // Reset in-flight statuses on startup.
-            match entry.status {
-                DownloadStatus::Downloading => entry.status = DownloadStatus::Paused,
-                // Queued items lose their position across restarts — treat as paused.
-                DownloadStatus::Queued | DownloadStatus::Pending => entry.status = DownloadStatus::Paused,
-                _ => {}
-            }
+            log::info!("[DownloadTracker] Loaded {} downloads from disk", downloads.len());
+        } // release write lock before emitting
 
-            downloads.insert(entry.id.clone(), entry);
+        if needs_migration_save {
+            log::info!("[DownloadTracker] Migrating file_path entries to relative format");
+            if let Err(e) = self.save().await {
+                log::warn!("[DownloadTracker] Migration save failed: {}", e);
+            }
         }
 
-        log::info!("[DownloadTracker] Loaded {} downloads from disk", downloads.len());
+        // Push the loaded state to the frontend. The frontend may have already
+        // called get_downloads before this async task completed (race on startup),
+        // so this event guarantees it ends up with the correct list.
+        self.emit_downloads_update().await;
         Ok(())
     }
 
@@ -221,6 +256,12 @@ impl DownloadTracker {
 
     /// Complete a download
     pub async fn complete_download(&self, id: &str, file_path: &str, file_size: u64) -> Result<(), String> {
+        // Store only the filename (relative), not the full absolute path
+        let relative = PathBuf::from(file_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| file_path.to_string());
+
         let should_emit = {
             let mut downloads = self.downloads.write().await;
             if let Some(entry) = downloads.get_mut(id) {
@@ -230,7 +271,7 @@ impl DownloadTracker {
                     return Ok(());
                 }
                 entry.status = DownloadStatus::Completed;
-                entry.file_path = Some(file_path.to_string());
+                entry.file_path = Some(relative);
                 entry.downloaded_bytes = file_size;
                 entry.total_bytes = file_size;
                 entry.completed_at = Some(std::time::SystemTime::now()
@@ -342,10 +383,14 @@ impl DownloadTracker {
         // Delete the partial file to free disk space.
         // For streaming downloads the download loop also does this, so a double-
         // delete is possible — ignore any error from the second attempt.
-        if let Some(path) = partial_file {
-            if !path.is_empty() {
-                let _ = std::fs::remove_file(&path);
-                log::info!("[DownloadTracker] Deleted partial file on cancel: {}", path);
+        if let Some(rel) = partial_file {
+            if !rel.is_empty() {
+                let abs_path = {
+                    let p = PathBuf::from(&rel);
+                    if p.is_absolute() { p } else { get_download_folder(&self.app_handle).join(p) }
+                };
+                let _ = std::fs::remove_file(&abs_path);
+                log::info!("[DownloadTracker] Deleted partial file on cancel: {:?}", abs_path);
             }
         }
 
@@ -474,17 +519,46 @@ impl DownloadTracker {
         Ok(())
     }
 
-    /// Update the file path for a download (called when download starts)
+    /// Update the file path for a download (called when download starts).
+    /// Stores only the filename (relative to download folder), not the full absolute path.
     pub async fn update_file_path(&self, id: &str, file_path: &str) -> Result<(), String> {
+        let relative = PathBuf::from(file_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| file_path.to_string());
         {
             let mut downloads = self.downloads.write().await;
             if let Some(entry) = downloads.get_mut(id) {
-                entry.file_path = Some(file_path.to_string());
-                log::info!("[DownloadTracker] Updated file path for {}: {}", id, file_path);
+                entry.file_path = Some(relative.clone());
+                log::info!("[DownloadTracker] Updated file path for {}: {}", id, relative);
             }
         }
         self.save().await?;
         self.emit_downloads_update().await;
+        Ok(())
+    }
+
+    /// Set a custom install directory for a specific download entry (persisted).
+    pub async fn set_install_dir(&self, id: &str, dir: &str) -> Result<(), String> {
+        {
+            let mut downloads = self.downloads.write().await;
+            if let Some(entry) = downloads.get_mut(id) {
+                entry.install_dir = Some(dir.to_string());
+            }
+        }
+        self.save().await?;
+        Ok(())
+    }
+
+    /// Set a custom download directory for a specific download entry (persisted).
+    pub async fn set_download_dir(&self, id: &str, dir: &str) -> Result<(), String> {
+        {
+            let mut downloads = self.downloads.write().await;
+            if let Some(entry) = downloads.get_mut(id) {
+                entry.download_dir = Some(dir.to_string());
+            }
+        }
+        self.save().await?;
         Ok(())
     }
 
@@ -526,6 +600,36 @@ impl DownloadTracker {
         Ok(())
     }
 
+    /// Normalize all stored file_path values from absolute → relative.
+    /// Returns how many entries were changed. Saves the DB if any were changed.
+    pub async fn normalize_paths(&self) -> usize {
+        let download_dir = get_download_folder(&self.app_handle);
+        let mut fixed = 0usize;
+        {
+            let mut downloads = self.downloads.write().await;
+            for entry in downloads.values_mut() {
+                if let Some(ref fp) = entry.file_path.clone() {
+                    let path = std::path::Path::new(fp);
+                    if path.is_absolute() {
+                        let relative = if let Ok(rel) = path.strip_prefix(&download_dir) {
+                            rel.to_string_lossy().replace('\\', "/")
+                        } else {
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| fp.clone())
+                        };
+                        entry.file_path = Some(relative);
+                        fixed += 1;
+                    }
+                }
+            }
+        }
+        if fixed > 0 {
+            let _ = self.save().await;
+        }
+        fixed
+    }
+
     /// Emit downloads update event to frontend
     async fn emit_downloads_update(&self) {
         let downloads = self.get_all_downloads().await;
@@ -542,18 +646,31 @@ fn get_downloads_db_path(app_handle: &AppHandle) -> PathBuf {
     app_data.join("downloads.json")
 }
 
-/// Get the download folder path
+/// Get the download folder path, respecting the user's custom data root if set.
 pub fn get_download_folder(app_handle: &AppHandle) -> PathBuf {
-    let app_data = app_handle.path().app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let downloads_dir = app_data.join("Downloads");
-
-    // Create the directory if it doesn't exist
-    if !downloads_dir.exists() {
-        let _ = std::fs::create_dir_all(&downloads_dir);
+    let dir = crate::settings::UserSettings::resolve_scrapstation_root(app_handle)
+        .join("Downloads");
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
     }
+    dir
+}
 
-    downloads_dir
+/// Resolve a DownloadEntry's stored file_path to an absolute filesystem path.
+/// Stored paths are relative (just the filename). Legacy absolute paths are kept as-is.
+pub fn resolve_file_path(entry: &DownloadEntry, app_handle: &AppHandle) -> Option<PathBuf> {
+    let p = entry.file_path.as_ref()?;
+    let path = PathBuf::from(p);
+    if path.is_absolute() {
+        return Some(path);
+    }
+    // Use custom download_dir if set, otherwise use the default folder
+    let base = if let Some(ref dir) = entry.download_dir {
+        PathBuf::from(dir)
+    } else {
+        get_download_folder(app_handle)
+    };
+    Some(base.join(path))
 }
 
 /// Generate a unique download ID

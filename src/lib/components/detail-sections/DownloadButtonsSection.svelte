@@ -3,6 +3,8 @@
     import { ExternalLink, Download, Loader2, AlertCircle, Globe, Lock, AlertTriangle } from 'lucide-svelte';
     import { onMount } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { open as openDialog } from '@tauri-apps/plugin-dialog';
+    import { storageConfig, getKnownLibraryLocations, type KnownLibraryLocation } from '$lib/stores/appSettings';
     import type { DetectedHost, SmartDownloadResult, DownloadButton } from '$lib/types';
     import InstallConfirmModal from './InstallConfirmModal.svelte';
     import NoticeModal from '../NoticeModal.svelte';
@@ -97,6 +99,41 @@
     let buttonStates: { [key: number]: ButtonState } = {};
     let resolvedLinkHosts: Record<string, DetectedHost | null> = {};
 
+    // ── Per-download folder selection ────────────────────────────────────────
+    // null = use the configured default (storageConfig.effective_download_path)
+    let chosenDownloadDir: string | null = null;
+    // null = follow download dir (auto-derived), or an explicit override
+    let chosenInstallDir: string | null = null;
+    $: effectiveDownloadDir = chosenDownloadDir ?? $storageConfig?.effective_download_path ?? null;
+
+    /**
+     * Effective install dir: explicit override → or derived from chosen download dir
+     * (replaces \ScrapStation\Downloads with \ScrapStation\Library) → or null (backend default).
+     */
+    function getEffectiveInstallDir(): string | null {
+        if (chosenInstallDir !== null) return chosenInstallDir;
+        if (chosenDownloadDir !== null) {
+            const sep = chosenDownloadDir.includes('\\') ? '\\' : '/';
+            return chosenDownloadDir.replace(/[/\\]ScrapStation[/\\]Downloads[/\\]?$/i, '') + sep + 'ScrapStation' + sep + 'Library';
+        }
+        return null;
+    }
+
+    // Known library locations (loaded once, used to build picker options)
+    let knownLocations: KnownLibraryLocation[] = [];
+
+    /** Options for the download dir picker: derive {root}\ScrapStation\Downloads from each known location */
+    $: downloadDirOptions = knownLocations.map(l => ({
+        path: l.path.replace(/[/\\]ScrapStation[/\\]Library[/\\]?$/i, '') + '\\ScrapStation\\Downloads',
+        label: l.label,
+    })).filter((opt, i, arr) => {
+        const key = opt.path.toLowerCase();
+        return arr.findIndex(o => o.path.toLowerCase() === key) === i;
+    });
+
+    /** Options for the install dir picker: directly the known library locations */
+    $: installDirOptions = knownLocations.map(l => ({ path: l.path, label: l.label }));
+
     // ── Per-button warning confirmation ─────────────────────────────────────
     let pendingWarning: { message: string; action: () => void } | null = null;
 
@@ -144,15 +181,17 @@
     }
 
     // ── Install preflight (disk-space check modal) ───────────────────────────
-    interface PendingInstall {
-        type: 'resolved';
-        link: ResolvedLink;
-        buttonIndex: number;
-        linkIndex: number;
-    }
+    type PendingInstall =
+        | { type: 'resolved'; link: ResolvedLink; buttonIndex: number; linkIndex: number }
+        | { type: 'smart'; button: DownloadButton; buttonIndex: number };
     let pendingInstall: PendingInstall | null = null;
-    let preflightInfo: { download_size_bytes: number; install_path: string; available_bytes: number } | null = null;
+    let preflightInfo: { download_size_bytes: number; download_path: string; install_path: string; available_bytes: number } | null = null;
     let preflightLoading = false;
+    // True while probe_download_size is running (size still unknown)
+    let sizeProbing = false;
+    // Probe result: resolved direct URL + optional webview cookies — reused when confirming install
+    let probedUrl: string | null = null;
+    let probedCookies: string | null = null;
 
     // Initialize button states
     $: if (data?.buttons) {
@@ -181,6 +220,8 @@
         detectHosts();
         // Auto-resolve buttons that have a resolver path (e.g., hosters)
         autoResolveButtons();
+        // Load known library locations for the picker dropdowns
+        try { knownLocations = await getKnownLibraryLocations(); } catch {}
     });
 
     // Automatically resolve buttons that have a resolver (e.g., hosters_page)
@@ -280,20 +321,106 @@
         }
     }
 
+    // Open the preflight modal: instantly show install path + disk space,
+    // then probe the real archive size in the background and update the modal.
+    async function _openPreflightModal(
+        install: PendingInstall,
+        probeUrl: string,
+    ) {
+        pendingInstall = install;
+        preflightInfo = null;
+        preflightLoading = true;
+        sizeProbing = false;
+        probedUrl = null;
+        probedCookies = null;
+
+        // Fast call: install path + available bytes only (no network probe)
+        // Read chosenDownloadDir directly (not effectiveDownloadDir, which may be stale due to Svelte batch updates)
+        const currentDownloadDir = chosenDownloadDir ?? $storageConfig?.effective_download_path ?? null;
+        const currentInstallDir = getEffectiveInstallDir();
+        try {
+            const pf = await invoke<{ download_size_bytes: number; download_path: string; install_path: string; available_bytes: number }>(
+                'get_install_preflight',
+                { url: probeUrl, sourceId, gameTitle, downloadDir: currentDownloadDir, installDir: currentInstallDir }
+            );
+            preflightInfo = { download_size_bytes: 0, download_path: pf.download_path, install_path: pf.install_path, available_bytes: pf.available_bytes };
+        } catch {
+            preflightInfo = { download_size_bytes: 0, download_path: currentDownloadDir ?? '', install_path: '', available_bytes: 0 };
+        } finally {
+            preflightLoading = false;
+        }
+
+        // Probe the real size via the full download pipeline (no file written).
+        // Also captures the resolved URL + cookies so the actual download can skip re-resolution.
+        sizeProbing = true;
+        invoke<{ size: number; resolved_url: string; cookies: string | null }>('probe_download_size', { url: probeUrl, sourceId })
+            .then(result => {
+                if (pendingInstall && preflightInfo && result.size > 0) {
+                    preflightInfo = { ...preflightInfo, download_size_bytes: result.size };
+                }
+                // Store resolved URL + cookies for instant download start on confirm
+                probedUrl = result.resolved_url || null;
+                probedCookies = result.cookies ?? null;
+            })
+            .catch(() => {})
+            .finally(() => { sizeProbing = false; });
+    }
+
+    // Change the download folder from within the preflight modal
+    // path = selected location, null = open system folder picker
+    async function handleChangeDownloadDir(path: string | null) {
+        let chosen: string | null = path;
+        if (chosen === null) {
+            const result = await openDialog({ directory: true, title: 'Choose Download Folder' });
+            if (!result) return;
+            chosen = result as string;
+        }
+        chosenDownloadDir = chosen;
+        if (pendingInstall) {
+            const probeUrl = pendingInstall.type === 'smart' ? pendingInstall.button.url : pendingInstall.link.url;
+            await _openPreflightModal(pendingInstall, probeUrl);
+        }
+    }
+
+    // Change the install folder from within the preflight modal (Advanced)
+    // path = selected location, null = open system folder picker
+    async function handleChangeInstallDir(path: string | null) {
+        let chosen: string | null = path;
+        if (chosen === null) {
+            const result = await openDialog({ directory: true, title: 'Choose Install Folder' });
+            if (!result) return;
+            chosen = result as string;
+        }
+        chosenInstallDir = chosen;
+        if (pendingInstall) {
+            const probeUrl = pendingInstall.type === 'smart' ? pendingInstall.button.url : pendingInstall.link.url;
+            await _openPreflightModal(pendingInstall, probeUrl);
+        }
+    }
+
+    // Show preflight modal, then start download on confirm
     async function smartDownload(button: DownloadButton, index: number) {
+        buttonStates[index] = { ...buttonStates[index], loading: true, status: 'Checking…' };
+        buttonStates = buttonStates;
+
+        await _openPreflightModal({ type: 'smart', button, buttonIndex: index }, button.url);
+
+        buttonStates[index] = { ...buttonStates[index], loading: false, status: '' };
+        buttonStates = buttonStates;
+    }
+
+    // Actual download logic after preflight confirmation
+    async function _startSmartDownload(button: DownloadButton, index: number) {
         buttonStates[index] = { ...buttonStates[index], loading: true, status: 'Resolving download link...' };
         buttonStates = buttonStates;
 
-        // Ensure game is in library first
         const gameId = await ensureGameInLibrary();
 
-        // Extract filename from URL
         const urlFilename = button.url.split('/').pop()?.split('?')[0] || 'download';
         const fileName = urlFilename.includes('.') ? urlFilename : `${urlFilename}.rar`;
         const hostLabel = buttonStates[index]?.detectedHost?.label || 'Unknown';
         const hostColor = buttonStates[index]?.detectedHost?.color || '#00e5ff';
 
-        // Add to downloads store
         const downloadId = addDownload({
             gameTitle,
             fileName,
@@ -303,7 +430,6 @@
             hostColor
         });
 
-        // Link download to library game
         if (gameId) {
             await linkDownloadToLibrary(gameId, downloadId);
         }
@@ -314,23 +440,19 @@
                 url: button.url,
                 sourceId,
                 filenameHint: (button as any).filename || null,
+                preResolvedUrl: probedUrl,
+                preCookies: probedCookies,
+                downloadDir: chosenDownloadDir,
+                installDir: getEffectiveInstallDir(),
             });
 
-            // Download started successfully - update UI to show it's in progress
-            buttonStates[index] = {
-                ...buttonStates[index],
-                status: 'Downloading...',
-                loading: false  // Button is no longer loading, download is happening in background
-            };
-
-            // Clear status after a bit - the Downloads page will show the actual progress
+            buttonStates[index] = { ...buttonStates[index], status: 'Downloading…', loading: false };
             setTimeout(() => {
                 buttonStates[index] = { ...buttonStates[index], status: '' };
                 buttonStates = buttonStates;
             }, 3000);
         } catch (error: any) {
             failDownload(downloadId, error.toString());
-
             buttonStates[index] = {
                 ...buttonStates[index],
                 loading: false,
@@ -452,33 +574,28 @@
 
     // Show install-preflight modal before downloading a resolved link
     async function openResolvedLink(link: ResolvedLink, buttonIndex: number, linkIndex: number) {
-        pendingInstall = { type: 'resolved', link, buttonIndex, linkIndex };
-        preflightInfo = null;
-        preflightLoading = true;
-        try {
-            preflightInfo = await invoke<{ download_size_bytes: number; install_path: string; available_bytes: number }>(
-                'get_install_preflight',
-                { url: link.url, sourceId, gameTitle }
-            );
-        } catch (e) {
-            preflightInfo = { download_size_bytes: 0, install_path: '', available_bytes: 0 };
-        } finally {
-            preflightLoading = false;
-        }
+        await _openPreflightModal({ type: 'resolved', link, buttonIndex, linkIndex }, link.url);
     }
 
     function cancelInstall() {
         pendingInstall = null;
         preflightInfo = null;
         preflightLoading = false;
+        sizeProbing = false;
+        probedUrl = null;
+        probedCookies = null;
     }
 
     async function confirmInstall() {
         if (!pendingInstall) return;
-        const { link, buttonIndex, linkIndex } = pendingInstall;
+        const inst = pendingInstall;
         pendingInstall = null;
         preflightInfo = null;
-        await _startResolvedDownload(link, buttonIndex, linkIndex);
+        if (inst.type === 'resolved') {
+            await _startResolvedDownload(inst.link, inst.buttonIndex, inst.linkIndex);
+        } else if (inst.type === 'smart') {
+            await _startSmartDownload(inst.button, inst.buttonIndex);
+        }
     }
 
     // Actual download logic (called after user confirms in the modal)
@@ -513,6 +630,10 @@
                 url: link.url,
                 sourceId,
                 filenameHint: null,
+                preResolvedUrl: probedUrl,
+                preCookies: probedCookies,
+                downloadDir: chosenDownloadDir,
+                installDir: getEffectiveInstallDir(),
             });
             // Progress and completion will come via events
         } catch (error: any) {
@@ -881,8 +1002,13 @@
         {coverUrl}
         preflight={preflightInfo}
         loading={preflightLoading}
+        {sizeProbing}
         onConfirm={confirmInstall}
         onCancel={cancelInstall}
+        onChangeDownloadDir={handleChangeDownloadDir}
+        onChangeInstallDir={handleChangeInstallDir}
+        {downloadDirOptions}
+        {installDirOptions}
     />
 {/if}
 

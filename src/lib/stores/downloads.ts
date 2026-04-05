@@ -5,6 +5,18 @@ import type { DownloadGroup } from '$lib/types';
 
 export type DownloadStatus = 'queued' | 'pending' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
+/** Convert a raw backend error string into a user-friendly message. */
+function friendlyDownloadError(error: string): string {
+    if (error.startsWith('disk_space:')) return 'Not enough disk space';
+    if (/network error|connection (reset|refused|timed? ?out)|timed? ?out/i.test(error)) return 'Network error — check your connection';
+    if (/http error: 403|forbidden/i.test(error)) return 'Access denied (403)';
+    if (/http error: 404|not found/i.test(error)) return 'File not found (404)';
+    if (/http error: 5\d\d/i.test(error)) return 'Server error — try again later';
+    if (/permission|access denied|cannot open|locked/i.test(error)) return 'File access error';
+    // Strip internal prefixes but keep the message readable
+    return error.replace(/^(Write error|Flush error|Network error): /, '').slice(0, 80) || 'Download failed';
+}
+
 export interface Download {
     id: string;
     game_title: string;
@@ -357,6 +369,10 @@ interface QueuedAction {
     url: string;
     sourceId: string;
     filenameHint: string | null;
+    preResolvedUrl: string | null;
+    preCookies: string | null;
+    downloadDir: string | null;
+    installDir: string | null;
 }
 
 const _queue: QueuedAction[] = [];
@@ -393,6 +409,10 @@ async function _startDownload(action: QueuedAction): Promise<void> {
         sourceId: action.sourceId,
         filenameHint: action.filenameHint,
         downloadId: action.downloadId,
+        preResolvedUrl: action.preResolvedUrl ?? null,
+        preCookies: action.preCookies ?? null,
+        downloadDir: action.downloadDir ?? null,
+        installDir: action.installDir ?? null,
     }).catch(() => {
         _queueProcessing = false;
     });
@@ -417,12 +437,20 @@ export async function enqueueDownload(params: {
     url: string;
     sourceId: string;
     filenameHint?: string | null;
+    preResolvedUrl?: string | null;
+    preCookies?: string | null;
+    downloadDir?: string | null;
+    installDir?: string | null;
 }): Promise<void> {
     const action: QueuedAction = {
         downloadId: params.downloadId,
         url: params.url,
         sourceId: params.sourceId,
         filenameHint: params.filenameHint ?? null,
+        preResolvedUrl: params.preResolvedUrl ?? null,
+        preCookies: params.preCookies ?? null,
+        downloadDir: params.downloadDir ?? null,
+        installDir: params.installDir ?? null,
     };
 
     if (!hasActiveDownload(action.downloadId) && !_queueProcessing) {
@@ -498,10 +526,11 @@ export async function initDownloadEvents(): Promise<void> {
     }>('download-error', async (event) => {
         const { id, error } = event.payload;
         _queueProcessing = false;
+        const friendlyError = friendlyDownloadError(error);
         downloads.update(list => list.map(d => {
             if (d.id !== id) return d;
             if (d.status === 'cancelled') return d;
-            return { ...d, status: 'failed' as DownloadStatus, error };
+            return { ...d, status: 'failed' as DownloadStatus, error: friendlyError };
         }));
         await _processQueue();
     });

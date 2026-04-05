@@ -1,4 +1,4 @@
-use crate::config::hosts::{DetectedHost, DownloadMethod, SmartDownloadResult, DownloadError, DownloadErrorType};
+use crate::config::hosts::{DetectedHost, DownloadMethod, SmartDownloadResult};
 use crate::config::paths::{NavigationPath, PathStep, ResolvedLink, ResolutionResult};
 use crate::engine::download_manager::DownloadManager;
 use crate::engine::host_detector;
@@ -9,7 +9,6 @@ use crate::settings::UserSettings;
 use crate::utils::http_client::HttpClient;
 use crate::utils::create_client;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::helpers::resolve_link_on_demand;
@@ -165,6 +164,12 @@ pub async fn smart_download(
     source_id: String,
     filename_hint: Option<String>,
     download_id: Option<String>,
+    pre_resolved_url: Option<String>,
+    pre_cookies: Option<String>,
+    #[allow(non_snake_case)]
+    download_dir: Option<String>,
+    #[allow(non_snake_case)]
+    install_dir: Option<String>,
     tracker: State<'_, Arc<TokioMutex<DownloadTracker>>>,
 ) -> Result<SmartDownloadResult, String> {
     log::info!("[SmartDownload] Starting for URL: {}", url);
@@ -183,6 +188,11 @@ pub async fn smart_download(
     let filename_hint_clone = filename_hint.clone();
     let dl_id_clone = dl_id.clone();
 
+    let pre_resolved_url_clone = pre_resolved_url.clone();
+    let pre_cookies_clone = pre_cookies.clone();
+    let download_dir_clone = download_dir.clone();
+    let install_dir_clone = install_dir.clone();
+
     // Spawn the download in background
     tokio::spawn(async move {
         if let Err(e) = run_smart_download_background(
@@ -192,6 +202,10 @@ pub async fn smart_download(
             filename_hint_clone,
             dl_id_clone,
             tracker_clone,
+            pre_resolved_url_clone,
+            pre_cookies_clone,
+            download_dir_clone,
+            install_dir_clone,
         ).await {
             log::error!("[SmartDownload] Background download failed: {}", e);
         }
@@ -215,10 +229,31 @@ async fn run_smart_download_background(
     filename_hint: Option<String>,
     download_id: String,
     tracker: Arc<TokioMutex<DownloadTracker>>,
+    pre_resolved_url: Option<String>,
+    pre_cookies: Option<String>,
+    download_dir: Option<String>,
+    install_dir: Option<String>,
 ) -> Result<(), String> {
     use crate::engine::download_manager::streaming_download;
 
     log::info!("[SmartDownloadBg] Starting background download: {}", download_id);
+
+    // Fast path: probe already resolved the URL — skip all resolution and go straight to streaming.
+    if let Some(direct_url) = pre_resolved_url {
+        log::info!("[SmartDownloadBg] Using pre-resolved URL from probe, skipping resolution: {}", direct_url);
+        let source_cookies = UserSettings::get_cookies(&source_id);
+        let effective_cookies = pre_cookies.or(source_cookies);
+        return perform_streaming_download_bg(
+            app_handle,
+            direct_url,
+            filename_hint,
+            download_id,
+            tracker,
+            effective_cookies,
+            download_dir,
+            install_dir,
+        ).await;
+    }
 
     let config = SourceLoader::load_by_id(&source_id)?;
     let cookies = UserSettings::get_cookies(&source_id);
@@ -267,7 +302,7 @@ async fn run_smart_download_background(
 
             if let Some(webview_config) = &hc.webview_config {
                 let downloader = WebViewDownloader::new(app_handle.clone());
-                let result = downloader.get_download_url(&resolved_url, webview_config, Some(download_id.clone())).await;
+                let result = downloader.get_download_url(&resolved_url, webview_config, Some(download_id.clone()), false).await;
 
                 if result.success {
                     if let Some(file_path) = result.file_path {
@@ -287,6 +322,8 @@ async fn run_smart_download_background(
                             download_id,
                             tracker,
                             cookies.clone(),
+                            download_dir,
+                            install_dir,
                         ).await;
                     }
                 }
@@ -324,6 +361,8 @@ async fn run_smart_download_background(
         download_id,
         tracker,
         cookies,
+        download_dir,
+        install_dir,
     ).await
 }
 
@@ -335,10 +374,29 @@ async fn perform_streaming_download_bg(
     download_id: String,
     tracker: Arc<TokioMutex<DownloadTracker>>,
     cookies: Option<String>,
+    download_dir: Option<String>,
+    install_dir: Option<String>,
 ) -> Result<(), String> {
     use crate::engine::download_manager::streaming_download;
 
-    let download_folder = get_download_folder(&app_handle);
+    let download_folder = if let Some(ref dir) = download_dir {
+        let p = std::path::PathBuf::from(dir);
+        if !p.exists() { let _ = std::fs::create_dir_all(&p); }
+        p
+    } else {
+        get_download_folder(&app_handle)
+    };
+
+    // Persist custom dirs so resume / resolve_file_path / extraction know where to look
+    {
+        let tracker_guard = tracker.lock().await;
+        if let Some(ref dir) = download_dir {
+            let _ = tracker_guard.set_download_dir(&download_id, dir).await;
+        }
+        if let Some(ref dir) = install_dir {
+            let _ = tracker_guard.set_install_dir(&download_id, dir).await;
+        }
+    }
 
     // Get signals from tracker
     let signals = {
@@ -392,6 +450,7 @@ async fn perform_streaming_download_bg(
         download_id.clone(),
         signals,
         Some(progress_callback),
+        cookies,
     ).await {
         Ok(result) => {
             // Update tracker with actual filename and completion
@@ -755,6 +814,8 @@ pub async fn register_download(
         downloaded_bytes: 0,
         total_bytes: 0,
         file_path: None,
+        download_dir: None,
+        install_dir: None,
         error: None,
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -805,13 +866,27 @@ pub async fn update_download_status(
     Ok(())
 }
 
-/// Get all downloads from the tracker
+/// Get all downloads from the tracker.
+/// Resolves relative file_path values to absolute before sending to the frontend,
+/// so that open_file_location and similar calls always receive absolute paths.
 #[tauri::command]
 pub async fn get_downloads(
+    app_handle: AppHandle,
     tracker: State<'_, Arc<TokioMutex<DownloadTracker>>>,
 ) -> Result<Vec<DownloadEntry>, String> {
     let tracker = tracker.lock().await;
-    Ok(tracker.get_all_downloads().await)
+    let mut entries = tracker.get_all_downloads().await;
+    for entry in &mut entries {
+        if let Some(fp) = &entry.file_path {
+            let path = std::path::Path::new(fp);
+            if !path.is_absolute() {
+                entry.file_path = Some(
+                    get_download_folder(&app_handle).join(fp).to_string_lossy().to_string()
+                );
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// Pause a download
@@ -978,10 +1053,8 @@ async fn resume_download_task(
     }
 
     let download_folder = get_download_folder(&app_handle);
-    // Use saved file_path if available, otherwise construct from filename
-    let destination = entry.file_path
-        .as_ref()
-        .map(PathBuf::from)
+    // Resolve saved file_path (may be relative or legacy absolute), fallback to filename
+    let destination = crate::engine::download_tracker::resolve_file_path(&entry, &app_handle)
         .unwrap_or_else(|| download_folder.join(&entry.file_name));
 
     log::info!("[ResumeDownload] Destination: {:?}", destination);
@@ -1177,7 +1250,7 @@ async fn maybe_auto_extract(app_handle: AppHandle, download_id: &str, _file_path
     // Collect the file paths of all downloads linked to this game.
     // If some are not yet complete (multi-part in-progress), bail out —
     // the next part's completion will call us again.
-    let file_paths: Vec<String> = {
+    let (file_paths, custom_install_dir): (Vec<String>, Option<String>) = {
         let dt = dt_arc.lock().await;
         let entries = dt.get_entries_by_ids(&game.download_ids).await;
 
@@ -1193,15 +1266,32 @@ async fn maybe_auto_extract(app_handle: AppHandle, download_id: &str, _file_path
             return;
         }
 
-        entries
+        // Grab custom install dir from the triggering download (first entry that has one)
+        let install_dir = entries.iter().find_map(|e| e.install_dir.clone());
+
+        let paths = entries
             .into_iter()
-            .filter_map(|e| e.file_path)
-            .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
-            .collect()
+            .filter_map(|e| {
+                let resolved = crate::engine::download_tracker::resolve_file_path(&e, &app_handle)?;
+                if !resolved.exists() { return None; }
+                Some(resolved.to_string_lossy().to_string())
+            })
+            .collect();
+
+        (paths, install_dir)
     };
 
     if file_paths.is_empty() {
-        log::warn!("[AutoExtract] No archive files found for game '{}' — skipping.", game.title);
+        log::error!("[AutoExtract] No archive files found for game '{}' — emitting error.", game.title);
+        {
+            let lt = lt_arc.lock().await;
+            use crate::engine::library_tracker::LibraryGameStatus;
+            let _ = lt.update_status(&game.id, LibraryGameStatus::Corrupted).await;
+        }
+        let _ = app_handle.emit("extraction-error", serde_json::json!({
+            "gameId": game.id,
+            "error": "No archive files were found after download completed."
+        }));
         return;
     }
 
@@ -1214,7 +1304,7 @@ async fn maybe_auto_extract(app_handle: AppHandle, download_id: &str, _file_path
     let app_clone = app_handle.clone();
     let game_id = game.id.clone();
     tokio::spawn(async move {
-        trigger_auto_extraction(app_clone, game_id, file_paths, lt_arc).await;
+        trigger_auto_extraction(app_clone, game_id, file_paths, lt_arc, custom_install_dir).await;
     });
 }
 
@@ -1224,6 +1314,7 @@ async fn trigger_auto_extraction(
     game_id: String,
     file_paths: Vec<String>,
     library_tracker: Arc<TokioMutex<crate::engine::LibraryTracker>>,
+    custom_install_dir: Option<String>,
 ) {
     use crate::engine::archive_extractor::{ArchiveExtractor, delete_archives};
     use crate::engine::executable_detector::ExecutableDetector;
@@ -1236,7 +1327,11 @@ async fn trigger_auto_extraction(
         match lt.get_game(&game_id).await {
             Some(g) => g,
             None => {
-                log::warn!("[AutoExtract] Game not found in library: {}", game_id);
+                log::error!("[AutoExtract] Game not found in library: {}", game_id);
+                let _ = app_handle.emit("extraction-error", serde_json::json!({
+                    "gameId": game_id,
+                    "error": "Game not found in library — cannot extract."
+                }));
                 return;
             }
         }
@@ -1249,7 +1344,15 @@ async fn trigger_auto_extraction(
     }
 
     let paths: Vec<PathBuf> = file_paths.iter().map(PathBuf::from).collect();
-    let destination = PathBuf::from(&game.install_path);
+
+    // Determine destination: custom install dir overrides the library default
+    let destination = if let Some(ref dir) = custom_install_dir {
+        let slug = crate::engine::library_tracker::generate_game_slug(&game.title);
+        PathBuf::from(dir).join(&slug).join("game")
+    } else {
+        crate::engine::library_tracker::resolve_install_path(&game, &app_handle)
+    };
+
     let password = game.archive_password.clone();
 
     log::info!(
@@ -1264,11 +1367,28 @@ async fn trigger_auto_extraction(
         Ok(result) => {
             log::info!("[AutoExtract] Done: {} files, {} bytes", result.files_extracted, result.total_size);
 
+            if result.files_extracted == 0 {
+                log::error!("[AutoExtract] Extraction reported success but 0 files extracted.");
+                let lt = library_tracker.lock().await;
+                let _ = lt.update_status(&game_id, LibraryGameStatus::Corrupted).await;
+                let _ = app_handle.emit("extraction-error", serde_json::json!({
+                    "gameId": game_id,
+                    "error": "disk_space: Not enough disk space — no files were extracted."
+                }));
+                return;
+            }
+
             let executables = ExecutableDetector::detect_executables(&destination, &game.title);
             let install_size = ExecutableDetector::calculate_directory_size(&destination);
 
             {
                 let lt = library_tracker.lock().await;
+                // If a custom install dir was used, persist the absolute path in the library
+                // so launch/open-folder resolve to the right place.
+                if custom_install_dir.is_some() {
+                    let abs_path = destination.to_string_lossy().to_string();
+                    let _ = lt.update_install_path(&game_id, &abs_path).await;
+                }
                 let _ = lt.set_executables(&game_id, executables).await;
                 let _ = lt.set_install_size(&game_id, install_size).await;
                 let _ = lt.update_status(&game_id, LibraryGameStatus::Ready).await;
@@ -1286,6 +1406,19 @@ async fn trigger_auto_extraction(
         Err(e) => {
             log::error!("[AutoExtract] Extraction failed for {}: {}", game_id, e);
 
+            let err_str = e.to_string();
+            let tagged = if err_str.to_lowercase().contains("no space left")
+                || err_str.to_lowercase().contains("disk is full")
+                || err_str.to_lowercase().contains("not enough space")
+                || err_str.to_lowercase().contains("insufficient")
+                || err_str.to_lowercase().contains("write error")
+            {
+                format!("disk_space: {}", err_str)
+            } else {
+                err_str
+            };
+
+            // Mark as corrupted so the Extract button can find and retry it
             {
                 let lt = library_tracker.lock().await;
                 let _ = lt.update_status(&game_id, LibraryGameStatus::Corrupted).await;
@@ -1293,7 +1426,7 @@ async fn trigger_auto_extraction(
 
             let _ = app_handle.emit("extraction-error", serde_json::json!({
                 "gameId": game_id,
-                "error": e.to_string()
+                "error": tagged
             }));
         }
     }
@@ -1303,13 +1436,28 @@ async fn trigger_auto_extraction(
 // INSTALL PREFLIGHT — disk space check before downloading
 // ============================================================================
 
+/// Result returned by probe_download_size.
+/// Contains the file size AND the fully-resolved direct URL + cookies so the
+/// real download can skip all resolution steps and start immediately.
+#[derive(serde::Serialize)]
+pub struct ProbeResult {
+    /// Archive size in bytes (0 = unknown)
+    pub size: u64,
+    /// Fully resolved direct download URL (after source + host resolution)
+    pub resolved_url: String,
+    /// Cookie header string extracted from the webview session (webview hosts only)
+    pub cookies: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 pub struct InstallPreflight {
     /// Compressed archive size from Content-Length header (0 = unknown)
     pub download_size_bytes: u64,
+    /// Where the archive will be downloaded to
+    pub download_path: String,
     /// Where the game will be installed on this machine
     pub install_path: String,
-    /// Free bytes available on the destination drive (0 = could not determine)
+    /// Free bytes available on the download drive (0 = could not determine)
     pub available_bytes: u64,
 }
 
@@ -1350,8 +1498,8 @@ async fn head_content_length(url: &str, source_id: &str) -> u64 {
             .get(url)
             .header("User-Agent", crate::constants::USER_AGENT)
             .header("Range", "bytes=0-0");
-        if let Some(c) = cookies {
-            req = req.header("Cookie", c);
+        if let Some(ref c) = cookies {
+            req = req.header("Cookie", c.as_str());
         }
         if let Ok(resp) = req.send().await {
             // Parse Content-Range: bytes 0-0/12345678  or  bytes */12345678
@@ -1366,6 +1514,35 @@ async fn head_content_length(url: &str, source_id: &str) -> u64 {
                     }
                 }
             }
+            // Also check Content-Length on the range response itself
+            let len = resp.content_length().unwrap_or(0);
+            if len > 0 {
+                return len;
+            }
+        }
+    }
+
+    // ── 3. Full GET with no Accept-Encoding — same client as streaming_download ─
+    // create_client() sends Accept-Encoding: gzip which causes servers to use
+    // chunked transfer encoding (no Content-Length). Use a bare client with only
+    // User-Agent so the server sends uncompressed content with a real Content-Length,
+    // exactly like streaming_download does. Drop the body immediately after headers.
+    {
+        if let Ok(bare_client) = reqwest::Client::builder()
+            .user_agent(crate::constants::USER_AGENT)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+        {
+            let mut req = bare_client.get(url);
+            if let Some(c) = cookies {
+                req = req.header("Cookie", c);
+            }
+            if let Ok(resp) = req.send().await {
+                let len = resp.content_length().unwrap_or(0);
+                if len > 0 {
+                    return len;
+                }
+            }
         }
     }
 
@@ -1374,7 +1551,7 @@ async fn head_content_length(url: &str, source_id: &str) -> u64 {
 
 /// Return the number of free bytes available on the drive that contains `path`.
 /// Walks up to the first existing ancestor so it works for not-yet-created paths.
-fn available_bytes_at(path: &std::path::Path) -> u64 {
+pub(crate) fn available_bytes_at(path: &std::path::Path) -> u64 {
     // Find the highest existing ancestor
     let mut query = path.to_path_buf();
     loop {
@@ -1422,31 +1599,126 @@ fn available_bytes_at(path: &std::path::Path) -> u64 {
     }
 }
 
-/// Return download size, install path, and available disk space before
-/// committing to a download, so the frontend can show a Steam-style prompt.
+/// Return install path and available disk space. Download size is probed
+/// separately by probe_download_size so the modal can show path/space instantly.
 #[tauri::command]
 pub async fn get_install_preflight(
-    url: String,
-    source_id: String,
+    _url: String,
+    _source_id: String,
     game_title: String,
+    download_dir: Option<String>,
+    install_dir: Option<String>,
     app_handle: AppHandle,
 ) -> Result<InstallPreflight, String> {
     use crate::engine::library_tracker::{get_game_folder, generate_game_slug};
 
-    // 1. Compressed download size (best-effort HEAD request)
-    let download_size_bytes = head_content_length(&url, &source_id).await;
-
-    // 2. Compute install path (same logic as add_game_to_library)
     let game_slug = generate_game_slug(&game_title);
-    let install_path_buf = get_game_folder(&app_handle, &game_slug).join("game");
+
+    // Install path: custom dir + slug/game, or default library path
+    let install_path_buf = if let Some(ref dir) = install_dir {
+        std::path::PathBuf::from(dir).join(&game_slug).join("game")
+    } else {
+        get_game_folder(&app_handle, &game_slug).join("game")
+    };
     let install_path = install_path_buf.to_string_lossy().to_string();
 
-    // 3. Available bytes on destination drive
-    let available_bytes = available_bytes_at(&install_path_buf);
+    let download_folder = if let Some(ref dir) = download_dir {
+        std::path::PathBuf::from(dir)
+    } else {
+        get_download_folder(&app_handle)
+    };
+    let download_path = download_folder.to_string_lossy().to_string();
+    let available_bytes = available_bytes_at(&download_folder);
 
     Ok(InstallPreflight {
-        download_size_bytes,
+        download_size_bytes: 0,
+        download_path,
         install_path,
         available_bytes,
     })
+}
+
+/// Probe the real archive size by mirroring the exact download pipeline:
+/// source-level link resolution → host detection → webview URL capture (if needed)
+/// → bare GET for Content-Length. Returns 0 if size cannot be determined.
+#[tauri::command]
+pub async fn probe_download_size(url: String, source_id: String, app_handle: AppHandle) -> ProbeResult {
+    let zero = |resolved_url: String| ProbeResult { size: 0, resolved_url, cookies: None };
+
+    let config = match SourceLoader::load_by_id(&source_id) {
+        Ok(c) => c,
+        Err(_) => return zero(url),
+    };
+    let cookies = UserSettings::get_cookies(&source_id);
+
+    // Step 1: Source-level link resolution (same as run_smart_download_background)
+    let resolved_url = if let Some(link_config) = &config.link_resolution {
+        match resolve_link_on_demand(&url, link_config, cookies.as_deref()).await {
+            Ok(resolved) => resolved,
+            Err(_) => url.clone(),
+        }
+    } else {
+        url.clone()
+    };
+    // Normalize protocol-relative URLs (//host.com/…) → https:// (mirrors run_smart_download_background)
+    let resolved_url = if resolved_url.starts_with("//") {
+        format!("https:{}", resolved_url)
+    } else {
+        resolved_url
+    };
+
+    // Step 2: Detect host (same as run_smart_download_background)
+    let (_detected, host_config) = host_detector::detect_host_with_config(&resolved_url, config.hosts.as_ref());
+
+    // Step 3: If webview host — open browser, capture CDN URL, read Content-Length
+    if let Some(hc) = &host_config {
+        if hc.download_method == DownloadMethod::Webview {
+            log::info!("[probe_download_size] Webview host, opening browser to capture CDN URL");
+            if let Some(webview_config) = &hc.webview_config {
+                let downloader = WebViewDownloader::new(app_handle.clone());
+                let result = downloader.get_download_url(&resolved_url, webview_config, None, true).await;
+                log::info!("[probe_download_size] Webview probe: size={:?} cdn={:?}", result.file_size, result.download_url);
+                return ProbeResult {
+                    size: result.file_size.unwrap_or(0),
+                    resolved_url: result.download_url.unwrap_or(resolved_url),
+                    cookies: result.cookies,
+                };
+            }
+            return zero(resolved_url);
+        }
+    }
+
+    // Step 4: Non-webview host — run host-level resolver then bare GET
+    let probe_client = reqwest::Client::builder()
+        .user_agent(crate::constants::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .unwrap_or_default();
+    let http_client = HttpClient::new(probe_client);
+    let manager = DownloadManager::new(http_client);
+    let direct_url = manager.resolve_for_probe(&resolved_url, config.hosts.as_ref()).await;
+    log::debug!("[probe_download_size] direct URL: {}", direct_url);
+
+    // Bare GET — no Accept-Encoding so server must provide Content-Length
+    if let Ok(client) = reqwest::Client::builder()
+        .user_agent(crate::constants::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+    {
+        let mut req = client.get(&direct_url);
+        if let Some(c) = cookies {
+            req = req.header("Cookie", c);
+        }
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                let len = resp.content_length().unwrap_or(0);
+                if len > 0 {
+                    log::debug!("[probe_download_size] content-length: {}", len);
+                    return ProbeResult { size: len, resolved_url: direct_url, cookies: None };
+                }
+            }
+        }
+    }
+
+    zero(direct_url)
 }

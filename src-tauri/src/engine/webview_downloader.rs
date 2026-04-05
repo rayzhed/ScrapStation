@@ -20,6 +20,9 @@ pub struct WebViewDownloadResult {
     pub file_path: Option<String>,  // Path where file was downloaded (if WebView handled download)
     pub file_size: Option<u64>,     // Size of the downloaded file in bytes
     pub error: Option<String>,
+    /// Cookie header string captured from the webview session (probe-only mode).
+    /// Passed back to the real download to skip re-authentication.
+    pub cookies: Option<String>,
 }
 
 /// Event payload for download URL capture
@@ -337,12 +340,14 @@ impl WebViewDownloader {
     }
 
     /// Attempt to get download URL using an invisible WebView
-    /// download_id is used for progress tracking events
+    /// download_id is used for progress tracking events.
+    /// probe_only: if true, capture CDN URL + return Content-Length without downloading anything.
     pub async fn get_download_url(
         &self,
         url: &str,
         config: &WebViewDownloadConfig,
         download_id: Option<String>,
+        probe_only: bool,
     ) -> WebViewDownloadResult {
         log::info!("[WebViewDownloader] Starting for URL: {}", url);
 
@@ -394,6 +399,7 @@ impl WebViewDownloader {
                     file_path: None,
                     file_size: None,
                     error: Some(format!("Invalid URL '{}': {}", url, e)),
+                    cookies: None,
                 };
             }
         };
@@ -471,6 +477,7 @@ impl WebViewDownloader {
                     file_path: None,
                     file_size: None,
                     error: Some(format!("Failed to create webview: {}", e)),
+                    cookies: None,
                 };
             }
         };
@@ -619,6 +626,63 @@ impl WebViewDownloader {
 
         // If we captured a URL, download using reqwest with cookies
         if let Some(download_url) = captured_download_url {
+
+            // ---- PROBE-ONLY MODE: just return Content-Length, no actual download ----
+            if probe_only {
+                log::info!("[WebViewDownloader] Probe-only: captured CDN URL {}", download_url);
+
+                // Extract cookies from the webview session
+                let cookie_header = match download_url.parse::<url::Url>() {
+                    Ok(parsed_url) => {
+                        webview.cookies_for_url(parsed_url).ok()
+                            .map(|cookies| {
+                                cookies.iter()
+                                    .map(|c| format!("{}={}", c.name(), c.value()))
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .unwrap_or_default()
+                    }
+                    Err(_) => String::new(),
+                };
+
+                let _ = webview.close();
+
+                // Bare GET — no Accept-Encoding so server must include Content-Length
+                let mut headers = HeaderMap::new();
+                if !cookie_header.is_empty() {
+                    if let Ok(v) = HeaderValue::from_str(&cookie_header) {
+                        headers.insert(COOKIE, v);
+                    }
+                }
+                headers.insert("User-Agent", HeaderValue::from_static(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ));
+
+                let file_size = if let Ok(client) = reqwest::Client::builder()
+                    .default_headers(headers)
+                    .redirect(reqwest::redirect::Policy::limited(10))
+                    .build()
+                {
+                    client.get(&download_url).send().await
+                        .ok()
+                        .and_then(|r| if r.status().is_success() { r.content_length() } else { None })
+                } else {
+                    None
+                };
+
+                log::info!("[WebViewDownloader] Probe content-length: {:?}", file_size);
+                return WebViewDownloadResult {
+                    success: true,
+                    download_url: Some(download_url),
+                    file_path: None,
+                    file_size,
+                    error: None,
+                    cookies: if cookie_header.is_empty() { None } else { Some(cookie_header) },
+                };
+            }
+            // ---- END PROBE-ONLY MODE ----
+
             if let Some(destination) = destination_path {
                 log::info!("[WebViewDownloader] Extracting cookies for URL: {}", download_url);
 
@@ -714,6 +778,7 @@ impl WebViewDownloader {
                             file_path: Some(path.to_string_lossy().to_string()),
                             file_size: Some(size),
                             error: None,
+                            cookies: None,
                         };
                     }
                     Err(e) => {
@@ -741,6 +806,7 @@ impl WebViewDownloader {
                                 file_path: None,
                                 file_size: None,
                                 error: Some("Download paused".to_string()),
+                                cookies: None,
                             };
                         }
 
@@ -753,6 +819,7 @@ impl WebViewDownloader {
                                 file_path: None,
                                 file_size: None,
                                 error: Some("Download cancelled".to_string()),
+                                cookies: None,
                             };
                         }
 
@@ -787,6 +854,7 @@ impl WebViewDownloader {
             file_path: None,
             file_size: None,
             error: Some("Timeout waiting for download URL to be captured".to_string()),
+            cookies: None,
         }
     }
 
@@ -821,6 +889,7 @@ impl WebViewDownloader {
                     file_path: None,
                     file_size: None,
                     error: Some(format!("Invalid download URL '{}': {}", download_url, e)),
+                    cookies: None,
                 };
             }
         };
@@ -878,6 +947,7 @@ impl WebViewDownloader {
                     file_path: None,
                     file_size: None,
                     error: Some(format!("Failed to create fallback webview: {}", e)),
+                    cookies: None,
                 };
             }
         };
@@ -951,6 +1021,7 @@ impl WebViewDownloader {
                         file_path: Some(file_path.to_string_lossy().to_string()),
                         file_size,
                         error: None,
+                        cookies: None,
                     };
                 } else {
                     // Download failed
@@ -973,6 +1044,7 @@ impl WebViewDownloader {
                         file_path: None,
                         file_size: None,
                         error: Some("WebView download failed".to_string()),
+                        cookies: None,
                     };
                 }
             }
@@ -998,6 +1070,7 @@ impl WebViewDownloader {
             file_path: None,
             file_size: None,
             error: Some("Fallback download timeout".to_string()),
+            cookies: None,
         }
     }
 

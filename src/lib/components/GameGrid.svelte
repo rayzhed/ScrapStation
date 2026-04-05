@@ -23,7 +23,7 @@
     }
 </script>
 
-<div class="mx-auto px-6 py-5" style="max-width: 1920px;">
+<div class="mx-auto px-6 py-5 pb-10" style="max-width: 1920px;">
     {#if loading}
         <EmptyState type="loading" />
     {:else if error}
@@ -83,3 +83,4 @@
         {/if}
     {/if}
 </div>
+mak

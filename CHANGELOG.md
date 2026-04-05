@@ -7,6 +7,38 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [0.1.4] — 2026-04-05
+
+### Added
+- **Settings page** — converted from a popup modal to a full navigation page with a left sidebar (Storage, Sources, Recovery, per-source sections)
+- **Multi-library location system** — app now tracks multiple ScrapStation library trees; auto-detects existing `ScrapStation\Library` folders on every connected drive at startup
+- **Controlled game transfer** — Move button in the Library panel opens a location picker instead of a free folder browser; lists all known library locations as destinations
+- **Library locations management** in Settings → Storage: lists active, auto-detected, and user-added library folders with Active/Auto badges; supports adding extra locations via folder picker
+- **Drive badge** on each library card (bottom-right) showing which drive the game is installed on
+- **Install path display** in the selected-game panel, responsive — shows full path when space allows, truncates only when needed
+- **Custom transfer icon** — Move button now shows two document shapes with an arrow between them for clarity
+- **Repair Library scans all known locations** — Recovery → Fix Library now walks every detected library folder (active + default AppData + extras + all drives), recovering games from any previously active root
+- **Fix broken paths now multi-root aware** — Recovery → Fix broken paths resolves legacy relative paths against every known library folder, finding the correct one instead of defaulting to the current root
+- `get_known_library_locations`, `add_library_location`, `remove_library_location` Tauri commands
+
+### Changed
+- `add_game_to_library` now stores the **absolute install path** at creation time so games remain locatable when the data root is changed later
+- `normalize_paths` (Fix broken paths) now probes all known library roots when upgrading a legacy relative path, picking whichever root actually contains the game on disk
+- `repair_library` now stores absolute paths for recovered entries (was relative, which broke after root changes)
+- Settings left nav active state is now tracked via IntersectionObserver so it follows the scroll position
+- Library location entries are marked `removable: false` for auto-detected and system entries — only user-added extras show the remove button
+
+### Fixed
+- Games installed on a previously active drive (e.g. F:) no longer disappear from the library after the data root is changed; running Repair Library recovers them automatically
+- Move game dropdown no longer filters out "Current (custom)" — games on a different drive can now be moved into the active library
+- Settings modal `overflow: hidden` was clipping the Move dropdown; panel now uses explicit border-radius on the accent bar instead
+- Drive badge `{@const}` was placed outside an `{#each}` child — moved to the correct scope
+- Path comparison in `get_known_library_locations` now normalises case and trailing separators on Windows to avoid duplicates
+
+[0.1.4]: https://github.com/rayzhed/ScrapStation/compare/v0.1.3...v0.1.4
+
+---
+
 ## [0.1.3] — 2026-03-19
 
 ### Added
