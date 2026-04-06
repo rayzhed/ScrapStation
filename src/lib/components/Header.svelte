@@ -3,7 +3,6 @@
     import { animate } from 'motion';
     import { Zap, Layers, Library, Download, Settings, Gamepad2, Plus, FileCode2, CheckCircle2, XCircle, Sparkles, Info } from 'lucide-svelte';
     import * as LucideIcons from 'lucide-svelte';
-    import SettingsManager from './SettingsManager.svelte';
     import { currentMode, navigateTo } from '$lib/stores/navigation';
     import { downloadStats } from '$lib/stores/downloads';
     import { libraryStats } from '$lib/stores/library';
@@ -12,7 +11,6 @@
     import { loadGames } from '$lib/stores/games';
     import { invoke } from '@tauri-apps/api/core';
 
-    let showSettings = false;
     let sidebarEl: HTMLElement;
     let navEl: HTMLElement;
 
@@ -229,8 +227,8 @@
 
     <!-- Settings + About -->
     <div style="border-top: 1px solid rgba(255,255,255,0.18);">
-        <button on:click={() => showSettings = true} class="sc-nav-item">
-            <Settings size={14} strokeWidth={1.75} style="flex-shrink: 0; color: var(--label-tertiary);" />
+        <button on:click={() => navigateTo('settings')} class="sc-nav-item {$currentMode === 'settings' ? 'active' : ''}">
+            <Settings size={14} strokeWidth={$currentMode === 'settings' ? 2 : 1.75} style="flex-shrink: 0; color: {$currentMode === 'settings' ? 'var(--label-primary)' : 'var(--label-tertiary)'};" />
             <span>Settings</span>
         </button>
         <button on:click={() => navigateTo('about')} class="sc-nav-item {$currentMode === 'about' ? 'active' : ''}">
@@ -261,4 +259,3 @@
     </div>
 {/if}
 
-<SettingsManager bind:isOpen={showSettings} onClose={() => showSettings = false} />

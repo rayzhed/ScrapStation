@@ -4,6 +4,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use tauri::Manager;
+
+/// App-level storage configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppConfig {
+    /// Custom data root chosen by the user (e.g. "D:\MyGames").
+    /// The app appends \ScrapStation\Downloads and \ScrapStation\Library under it.
+    /// When None, falls back to AppData.
+    #[serde(default)]
+    pub data_root: Option<String>,
+    /// Additional Library folders the user wants to manage (e.g. a second drive).
+    /// Each entry is an absolute path to a Library folder.
+    #[serde(default)]
+    pub extra_library_paths: Vec<String>,
+}
 
 /// User settings stored per source
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -11,6 +26,9 @@ pub struct UserSettings {
     /// Settings values per source ID -> setting ID -> value
     #[serde(default)]
     pub source_settings: HashMap<String, HashMap<String, JsonValue>>,
+    /// App-level storage configuration
+    #[serde(default)]
+    pub app_config: AppConfig,
 }
 
 /// Global settings instance
@@ -141,6 +159,61 @@ impl UserSettings {
 
         log::info!("All settings cleared for source: {}", source_id);
         Ok(())
+    }
+
+    // ===== App-level storage config =====
+
+    /// Get the current app storage config
+    pub fn get_app_config() -> AppConfig {
+        SETTINGS.lock().ok().map(|s| s.app_config.clone()).unwrap_or_default()
+    }
+
+    /// Add an extra library path if not already present
+    pub fn add_library_path(path: String) -> Result<(), String> {
+        let mut settings = SETTINGS.lock()
+            .map_err(|e| format!("Failed to lock settings: {}", e))?;
+        if !settings.app_config.extra_library_paths.contains(&path) {
+            settings.app_config.extra_library_paths.push(path);
+            settings.save()?;
+        }
+        Ok(())
+    }
+
+    /// Remove an extra library path
+    pub fn remove_library_path(path: &str) -> Result<(), String> {
+        let mut settings = SETTINGS.lock()
+            .map_err(|e| format!("Failed to lock settings: {}", e))?;
+        settings.app_config.extra_library_paths.retain(|p| p != path);
+        settings.save()?;
+        Ok(())
+    }
+
+    /// Set a new data root (None = revert to AppData default)
+    pub fn set_data_root(root: Option<String>) -> Result<(), String> {
+        let mut settings = SETTINGS.lock()
+            .map_err(|e| format!("Failed to lock settings: {}", e))?;
+        settings.app_config.data_root = root;
+        settings.save()?;
+        log::info!("Data root updated to: {:?}", settings.app_config.data_root);
+        Ok(())
+    }
+
+    /// Resolve the ScrapStation root directory.
+    /// If the user set a custom data_root, returns `{data_root}\ScrapStation`.
+    /// Otherwise returns the Tauri AppData directory (unchanged behaviour).
+    pub fn resolve_scrapstation_root(app_handle: &tauri::AppHandle) -> PathBuf {
+        if let Some(root) = Self::get_app_config().data_root {
+            PathBuf::from(root).join("ScrapStation")
+        } else {
+            // Prefer Tauri's resolved path; fall back to %APPDATA%\ScrapStation so
+            // we never return an empty or relative path (which breaks explorer.exe).
+            app_handle.path().app_data_dir()
+                .unwrap_or_else(|_| {
+                    dirs::config_dir()
+                        .map(|d| d.join("ScrapStation"))
+                        .unwrap_or_else(|| PathBuf::from("C:\\ScrapStation"))
+                })
+        }
     }
 
     // ===== Backward Compatibility for Cookies =====

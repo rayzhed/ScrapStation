@@ -1,12 +1,15 @@
 use crate::engine::library_tracker::{
-    LibraryTracker, LibraryGame, LibraryGameStatus, GameExecutable,
-    get_library_folder, get_game_folder, generate_library_game_id, generate_game_slug, current_timestamp
+    LibraryTracker, LibraryGame, LibraryGameStatus, GameExecutable, ExeType,
+    get_library_folder, resolve_install_path,
+    generate_library_game_id, generate_game_slug, current_timestamp
 };
 use crate::engine::archive_extractor::{ArchiveExtractor, delete_archives};
 use crate::engine::executable_detector::ExecutableDetector;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State, Emitter};
+use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex as TokioMutex;
 
 // ========== LIBRARY CRUD ==========
@@ -49,8 +52,9 @@ pub async fn add_game_to_library(
 
     let id = generate_library_game_id(&source_slug, &source_game_id);
     let game_slug = generate_game_slug(&title);
-    let install_path = get_game_folder(&app_handle, &game_slug)
-        .join("game")
+    // Store absolute path so the game is always found regardless of data root changes
+    let install_path = get_library_folder(&app_handle)
+        .join(format!("{}/game", game_slug))
         .to_string_lossy()
         .to_string();
 
@@ -105,6 +109,7 @@ pub async fn remove_from_library(
     id: String,
     delete_files: bool,
     tracker: State<'_, Arc<TokioMutex<LibraryTracker>>>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
     let tracker = tracker.lock().await;
 
@@ -114,10 +119,22 @@ pub async fn remove_from_library(
     // Remove from database
     tracker.remove_game(&id).await?;
 
-    // Delete files if requested
-    if delete_files {
-        if let Some(g) = game {
-            let install_path = PathBuf::from(&g.install_path);
+    if let Some(g) = game {
+        // Always delete the cached cover — it's just a local cache file
+        if let Some(cover_path) = &g.cover_path {
+            let path = PathBuf::from(cover_path);
+            if path.exists() {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    log::warn!("[Library] Failed to delete cover file: {}", e);
+                } else {
+                    log::info!("[Library] Deleted cover: {:?}", path);
+                }
+            }
+        }
+
+        // Delete game files if requested
+        if delete_files {
+            let install_path = resolve_install_path(&g, &app_handle);
             // Delete the game folder (parent of install_path which is /game)
             if let Some(game_folder) = install_path.parent() {
                 if game_folder.exists() {
@@ -173,6 +190,12 @@ pub async fn extract_to_library(
     log::info!("[Library]   Install path: {}", game.install_path);
     log::info!("[Library]   Password stored in game: {:?}", game.archive_password);
 
+    // Guard against concurrent extractions for the same game
+    if matches!(game.status, LibraryGameStatus::Extracting) {
+        log::warn!("[Library] Extraction already in progress for {} — ignoring duplicate call.", game_id);
+        return Ok(());
+    }
+
     // Update status to extracting
     {
         let tracker = library_tracker.lock().await;
@@ -186,8 +209,39 @@ pub async fn extract_to_library(
     // Convert paths
     let paths: Vec<PathBuf> = archive_paths.iter().map(PathBuf::from).collect();
 
-    // Determine destination
-    let destination = PathBuf::from(&game.install_path);
+    // Determine destination (resolve relative install_path to absolute)
+    let destination = resolve_install_path(&game, &app_handle);
+
+    // ── Pre-extraction disk space check ──────────────────────────────────────
+    {
+        let archive_bytes: u64 = paths.iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+
+        if archive_bytes > 0 {
+            let estimated_extract: u64 = (archive_bytes as f64 * 2.5) as u64;
+            let available = crate::api::download_commands::available_bytes_at(&destination);
+
+            if available > 0 && available < estimated_extract {
+                let err = format!(
+                    "disk_space: Not enough disk space to extract. Needs ~{} MB but only {} MB available.",
+                    estimated_extract / 1_048_576,
+                    available / 1_048_576
+                );
+                log::warn!("[Library] {}", err);
+                {
+                    let tracker = library_tracker.lock().await;
+                    tracker.update_status(&game_id, LibraryGameStatus::Corrupted).await?;
+                }
+                let _ = app_handle.emit("extraction-error", serde_json::json!({
+                    "gameId": game_id,
+                    "error": err
+                }));
+                return Err(err);
+            }
+        }
+    }
 
     // Create extractor and run extraction
     let extractor = ArchiveExtractor::new(app_handle.clone());
@@ -203,6 +257,16 @@ pub async fn extract_to_library(
         Ok(extraction_result) => {
             log::info!("[Library] Extraction completed: {} files, {} bytes",
                 extraction_result.files_extracted, extraction_result.total_size);
+
+            if extraction_result.files_extracted == 0 {
+                log::error!("[Library] Extraction reported success but 0 files were extracted.");
+                let _ = library_tracker.lock().await.update_status(&game_id, LibraryGameStatus::Corrupted).await;
+                let _ = app_handle.emit("extraction-error", serde_json::json!({
+                    "gameId": game_id,
+                    "error": "disk_space: Not enough disk space — no files were extracted."
+                }));
+                return Err("disk_space: Not enough disk space — no files were extracted.".to_string());
+            }
 
             // Detect executables
             let executables = ExecutableDetector::detect_executables(&destination, &game.title);
@@ -233,21 +297,24 @@ pub async fn extract_to_library(
             Ok(())
         }
         Err(e) => {
-            log::error!("[Library] Extraction failed: {}", e);
+            // Tag disk-full errors so the frontend can show a specific message
+            let err_str = e.to_string();
+            let tagged = if is_disk_full_error(&err_str) {
+                format!("disk_space: {}", err_str)
+            } else {
+                err_str
+            };
+            log::error!("[Library] Extraction failed: {}", tagged);
 
-            // Update status to corrupted
-            {
-                let tracker = library_tracker.lock().await;
-                tracker.update_status(&game_id, LibraryGameStatus::Corrupted).await?;
-            }
+            // Mark as corrupted so the Extract button can still find and retry it
+            let _ = library_tracker.lock().await.update_status(&game_id, LibraryGameStatus::Corrupted).await;
 
-            // Emit error event
             let _ = app_handle.emit("extraction-error", serde_json::json!({
                 "gameId": game_id,
-                "error": e.to_string()
+                "error": tagged
             }));
 
-            Err(e.to_string())
+            Err(tagged)
         }
     }
 }
@@ -259,6 +326,7 @@ pub async fn extract_to_library(
 pub async fn launch_game(
     id: String,
     tracker: State<'_, Arc<TokioMutex<LibraryTracker>>>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
     let game = {
         let tracker = tracker.lock().await;
@@ -270,10 +338,10 @@ pub async fn launch_game(
         return Err("Game is not ready to launch".to_string());
     }
 
-    let exe_path = game.primary_exe
+    let exe_path = game.primary_exe.clone()
         .ok_or_else(|| "No executable selected".to_string())?;
 
-    let full_exe_path = PathBuf::from(&game.install_path).join(&exe_path);
+    let full_exe_path = resolve_install_path(&game, &app_handle).join(&exe_path);
 
     if !full_exe_path.exists() {
         return Err(format!("Executable not found: {:?}", full_exe_path));
@@ -329,6 +397,7 @@ pub async fn set_game_executable(
 pub async fn open_game_folder(
     id: String,
     tracker: State<'_, Arc<TokioMutex<LibraryTracker>>>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
     let game = {
         let tracker = tracker.lock().await;
@@ -336,33 +405,17 @@ pub async fn open_game_folder(
             .ok_or_else(|| format!("Game not found: {}", id))?
     };
 
-    let folder = PathBuf::from(&game.install_path);
+    let folder = resolve_install_path(&game, &app_handle);
+    log::info!("[Library] open_game_folder: stored='{}' resolved='{}'", game.install_path, folder.display());
 
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(&folder)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
+    if !folder.exists() {
+        return Err(format!(
+            "Game folder not found: {}. Try running Settings → Recovery → Fix Broken Paths.",
+            folder.display()
+        ));
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&folder)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&folder)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-
-    Ok(())
+    open_folder_in_explorer(&app_handle, &folder)
 }
 
 /// Get library folder path
@@ -373,11 +426,84 @@ pub async fn get_library_folder_path(
     Ok(get_library_folder(&app_handle).to_string_lossy().to_string())
 }
 
+/// Open the overall library folder in the system file explorer
+#[tauri::command]
+pub async fn open_library_folder(app_handle: AppHandle) -> Result<(), String> {
+    let folder = get_library_folder(&app_handle);
+    open_folder_in_explorer(&app_handle, &folder)
+}
+
+/// Move a game's install folder to a new parent directory chosen by the user.
+/// The game subfolder name is preserved; only its parent changes.
+#[tauri::command]
+pub async fn move_game(
+    game_id: String,
+    target_dir: String,
+    tracker: tauri::State<'_, Arc<tokio::sync::Mutex<LibraryTracker>>>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let tracker_arc = tracker.inner().clone();
+    let t = tracker_arc.lock().await;
+
+    let game = t.get_game(&game_id).await
+        .ok_or_else(|| format!("Game not found: {}", game_id))?;
+
+    // install_path is absolute, e.g. C:\...\Library\slug\game
+    let install_path = resolve_install_path(&game, &app_handle);
+
+    // game_root = C:\...\Library\slug  (the folder we actually move)
+    let game_root = install_path.parent()
+        .ok_or("Could not determine game root folder")?;
+
+    let folder_name = game_root.file_name()
+        .ok_or("Could not determine game folder name")?;
+
+    let game_subfolder = install_path.file_name()
+        .ok_or("Could not determine game subfolder name")?;
+
+    if !game_root.exists() {
+        return Err(format!("Source folder not found: {}", game_root.display()));
+    }
+
+    let new_game_root = PathBuf::from(&target_dir).join(folder_name);
+    if new_game_root.exists() {
+        return Err(format!("Destination already exists: {}", new_game_root.display()));
+    }
+
+    // Same-drive move (fast) — fall back to copy+delete for cross-drive
+    if std::fs::rename(game_root, &new_game_root).is_err() {
+        crate::copy_dir_recursive(game_root, &new_game_root)
+            .map_err(|e| format!("Failed to copy game files: {}", e))?;
+        std::fs::remove_dir_all(game_root)
+            .map_err(|e| format!("Failed to remove old files after copy: {}", e))?;
+    }
+
+    let new_install_path = new_game_root.join(game_subfolder)
+        .to_string_lossy()
+        .to_string();
+
+    t.update_install_path(&game_id, &new_install_path).await?;
+
+    log::info!("[Library] Moved game '{}' to {}", game_id, new_install_path);
+    Ok(new_install_path)
+}
+
+fn open_folder_in_explorer(app_handle: &AppHandle, path: &std::path::Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("Resolved path is not absolute: {}", path.display()));
+    }
+    let path_str = path.to_string_lossy().to_string();
+    log::info!("[Library] Opening folder: {}", path_str);
+    app_handle.shell().open(&path_str, None)
+        .map_err(|e| format!("Failed to open folder: {}", e))
+}
+
 /// Rescan executables for a game
 #[tauri::command]
 pub async fn rescan_game_executables(
     id: String,
     tracker: State<'_, Arc<TokioMutex<LibraryTracker>>>,
+    app_handle: AppHandle,
 ) -> Result<Vec<GameExecutable>, String> {
     let game = {
         let tracker = tracker.lock().await;
@@ -385,7 +511,7 @@ pub async fn rescan_game_executables(
             .ok_or_else(|| format!("Game not found: {}", id))?
     };
 
-    let destination = PathBuf::from(&game.install_path);
+    let destination = resolve_install_path(&game, &app_handle);
     let executables = ExecutableDetector::detect_executables(&destination, &game.title);
 
     {
@@ -454,6 +580,178 @@ pub async fn update_game_cover_url(
     });
 
     Ok(())
+}
+
+// ========== LIBRARY REPAIR ==========
+
+/// Scan the Library folder and repair library.json:
+///   - Add game folders that are not tracked at all
+///   - Update tracked games whose cover or executables are missing
+/// Returns the total number of entries added or updated.
+#[tauri::command]
+pub async fn repair_library(
+    app_handle: AppHandle,
+    tracker: State<'_, Arc<TokioMutex<LibraryTracker>>>,
+) -> Result<usize, String> {
+    let covers_dir = app_handle.path().app_data_dir()
+        .map(|d| d.join("covers"))
+        .ok();
+
+    // Snapshot of current library (resolved absolute install_path → game)
+    let existing: HashMap<String, LibraryGame> = {
+        let t = tracker.lock().await;
+        t.get_all_games().await.into_iter().map(|g| {
+            let abs = resolve_install_path(&g, &app_handle).to_string_lossy().to_string();
+            (abs, g)
+        }).collect()
+    };
+
+    let mut fixed = 0usize;
+    // Track which game IDs were already handled in phase 1
+    let mut handled_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // ── Phase 1: walk all known Library/ folders ─────────────────────────────
+    let library_folders = crate::api::settings_commands::all_library_paths(&app_handle);
+    for library_folder in &library_folders {
+    if library_folder.exists() {
+        let mut dir = tokio::fs::read_dir(&library_folder)
+            .await
+            .map_err(|e| format!("Failed to read library folder: {}", e))?;
+
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let folder_path = entry.path();
+            if !folder_path.is_dir() { continue; }
+
+            let game_path = folder_path.join("game");
+            if !game_path.is_dir() { continue; }
+
+            let game_path_str = game_path.to_string_lossy().to_string();
+            let folder_name = folder_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            if let Some(game) = existing.get(&game_path_str) {
+                // ── Already tracked: patch what's missing ────────────────
+                handled_ids.insert(game.id.clone());
+                let mut updated = false;
+
+                // Cover: missing or pointing to a file that no longer exists
+                let cover_missing = game.cover_path.as_ref()
+                    .map(|p| !std::path::Path::new(p).exists())
+                    .unwrap_or(true);
+
+                if cover_missing {
+                    if let Some(cover) = find_cover_by_slug(&covers_dir, &folder_name) {
+                        let t = tracker.lock().await;
+                        t.set_cover_path(&game.id, &cover).await?;
+                        updated = true;
+                        log::info!("[Library] Repair: restored cover for '{}'", game.title);
+                    }
+                }
+
+                // Executables: empty list or no primary selected
+                if game.executables.is_empty() || game.primary_exe.is_none() {
+                    let exes = ExecutableDetector::detect_executables(&game_path, &game.title);
+                    if !exes.is_empty() {
+                        let t = tracker.lock().await;
+                        t.set_executables(&game.id, exes).await?;
+                        updated = true;
+                        log::info!("[Library] Repair: rescanned executables for '{}'", game.title);
+                    }
+                }
+
+                if updated { fixed += 1; }
+            } else {
+                // ── Not tracked: add as a new recovered entry ─────────────
+                let title: String = folder_name
+                    .split('-')
+                    .map(|word| {
+                        let mut chars = word.chars();
+                        match chars.next() {
+                            None => String::new(),
+                            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                let id = generate_library_game_id("recovered", &folder_name);
+                let cover_path = find_cover_by_slug(&covers_dir, &folder_name);
+                let executables = ExecutableDetector::detect_executables(&game_path, &title);
+                let install_size = ExecutableDetector::calculate_directory_size(&game_path);
+                let primary_exe = executables.iter()
+                    .filter(|e| e.exe_type != ExeType::Installer && e.exe_type != ExeType::Redistributable)
+                    .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|e| e.path.clone());
+
+                let game = LibraryGame {
+                    id: id.clone(),
+                    source_slug: "recovered".to_string(),
+                    source_game_id: folder_name.clone(),
+                    title,
+                    cover_url: None,
+                    cover_path,
+                    // Store absolute path so the game is found regardless of which
+                    // library root is currently active.
+                    install_path: game_path_str.clone(),
+                    install_size,
+                    status: LibraryGameStatus::Ready,
+                    installed_at: current_timestamp(),
+                    last_played: None,
+                    total_playtime: 0,
+                    executables,
+                    primary_exe,
+                    archive_password: None,
+                    download_ids: vec![],
+                };
+
+                {
+                    let t = tracker.lock().await;
+                    t.add_game(game).await?;
+                }
+                fixed += 1;
+                log::info!("[Library] Repair: added missing game '{}' from {:?}", id, library_folder);
+            }
+        }
+    } // end exists check
+    } // end library_folder loop
+
+    // ── Phase 2: fix covers for tracked games not found in Library/ ──────────
+    // (e.g. games installed to a custom path, or Library/ didn't exist)
+    for (_, game) in &existing {
+        if handled_ids.contains(&game.id) { continue; }
+
+        let cover_missing = game.cover_path.as_ref()
+            .map(|p| !std::path::Path::new(p).exists())
+            .unwrap_or(true);
+
+        if cover_missing {
+            let slug = generate_game_slug(&game.title);
+            if let Some(cover) = find_cover_by_slug(&covers_dir, &slug) {
+                let t = tracker.lock().await;
+                t.set_cover_path(&game.id, &cover).await?;
+                fixed += 1;
+                log::info!("[Library] Repair: restored cover for '{}' (phase 2)", game.title);
+            }
+        }
+    }
+
+    log::info!("[Library] Repair complete: {} item(s) added/updated", fixed);
+    Ok(fixed)
+}
+
+/// Find the first matching cover image for a slug in the covers directory.
+fn find_cover_by_slug(covers_dir: &Option<std::path::PathBuf>, slug: &str) -> Option<String> {
+    let dir = covers_dir.as_ref()?;
+    for ext in &["jpg", "png", "webp"] {
+        let candidate = dir.join(format!("{}.{}", slug, ext));
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    None
 }
 
 // ========== COVER CACHING ==========
@@ -546,13 +844,24 @@ async fn cache_cover_impl(
     tokio::fs::create_dir_all(&covers_dir).await
         .map_err(|e| format!("Failed to create covers dir: {}", e))?;
 
+    // Use the game's title slug as the filename so covers are human-readable and
+    // can be matched back to their folder during a library repair.
+    let cover_filename = {
+        let t = tracker.lock().await;
+        if let Some(game) = t.get_game(game_id).await {
+            generate_game_slug(&game.title)
+        } else {
+            game_id.to_string() // fallback: game not found yet
+        }
+    };
+
     // Derive extension from URL (default to jpg)
     let lower = cover_url.to_lowercase();
     let ext = if lower.contains(".png") { "png" }
               else if lower.contains(".webp") { "webp" }
               else { "jpg" };
 
-    let cover_path = covers_dir.join(format!("{}.{}", game_id, ext));
+    let cover_path = covers_dir.join(format!("{}.{}", cover_filename, ext));
 
     // Download only if file is missing
     if !cover_path.exists() {
@@ -580,4 +889,17 @@ async fn cache_cover_impl(
 
     log::info!("[Library] Cover cached: {} → {}", game_id, path_str);
     Ok(())
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Returns true when the error string looks like a disk-full / out-of-space error.
+fn is_disk_full_error(err: &str) -> bool {
+    let s = err.to_lowercase();
+    s.contains("disk is full")
+        || s.contains("no space left")
+        || s.contains("not enough space")
+        || s.contains("storage full")
+        || s.contains("insufficient disk space")
+        || s.contains("there is not enough space")
 }

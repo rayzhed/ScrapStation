@@ -1,16 +1,15 @@
 <script lang="ts">
     import { invoke } from '@tauri-apps/api/core';
     import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+    import { open as openDialog } from '@tauri-apps/plugin-dialog';
     import { sources } from '$lib/stores/sources';
-    import { X, Settings, ChevronDown, ChevronRight, Save, RotateCcw, AlertCircle, Check, FolderOpen, ExternalLink } from 'lucide-svelte';
+    import { storageConfig, loadStorageConfig, setDataRoot, getKnownLibraryLocations, addLibraryLocation, removeLibraryLocation, type KnownLibraryLocation } from '$lib/stores/appSettings';
+    import { downloadStats } from '$lib/stores/downloads';
+    import { Settings, ChevronDown, ChevronRight, Save, RotateCcw, AlertCircle, Check, FolderOpen, ExternalLink, HardDrive, Wrench, CheckCircle, XCircle, Plus, Trash2 } from 'lucide-svelte';
     import * as LucideIcons from 'lucide-svelte';
     import { onMount, onDestroy } from 'svelte';
-    import { animate } from 'motion';
     import SettingSectionRenderer from './SettingSectionRenderer.svelte';
     import LegacySettingField from './settings/LegacySettingField.svelte';
-
-    export let isOpen = false;
-    export let onClose: () => void;
 
     interface AuthState {
         isLoggedIn: boolean;
@@ -66,6 +65,129 @@
     let loading = false;
     let sourcesFolderPath = '';
 
+    // Storage configuration
+    let storageSaving = false;
+    let storageRootChanged = false;
+    let showRootPicker = false;
+
+    /** Derive a data-root suggestion from a known library path by stripping the ScrapStation\Library suffix. */
+    function libraryPathToRoot(libraryPath: string): string {
+        return libraryPath.replace(/[/\\]ScrapStation[/\\]Library[/\\]?$/i, '');
+    }
+
+    /** Unique suggested data roots derived from all known library locations (excluding current active). */
+    $: suggestedRoots = (() => {
+        const currentRoot = $storageConfig?.data_root ?? null;
+        const seen = new Set<string>();
+        return knownLibraryLocations
+            .filter(l => !l.is_current)
+            .map(l => ({ path: libraryPathToRoot(l.path), label: l.label }))
+            .filter(r => {
+                const key = r.path.toLowerCase();
+                if (seen.has(key)) return false;
+                seen.add(key);
+                if (currentRoot && r.path.toLowerCase() === currentRoot.toLowerCase()) return false;
+                return r.path.length > 0;
+            });
+    })();
+    let knownLibraryLocations: KnownLibraryLocation[] = [];
+    let addingLocation = false;
+    let locationError: string | null = null;
+
+    async function loadLibraryLocations() {
+        try {
+            knownLibraryLocations = await getKnownLibraryLocations();
+        } catch (e) {
+            console.error('[Settings] Failed to load library locations:', e);
+        }
+    }
+
+    async function handleAddLibraryLocation() {
+        const result = await openDialog({ directory: true, title: 'Add Library Folder' });
+        if (!result) return;
+        locationError = null;
+        addingLocation = true;
+        try {
+            await addLibraryLocation(result as string);
+            await loadLibraryLocations();
+        } catch (e) {
+            locationError = String(e);
+            setTimeout(() => { locationError = null; }, 6000);
+        } finally {
+            addingLocation = false;
+        }
+    }
+
+    async function handleRemoveLibraryLocation(path: string) {
+        try {
+            await removeLibraryLocation(path);
+            await loadLibraryLocations();
+        } catch (e) {
+            locationError = String(e);
+            setTimeout(() => { locationError = null; }, 6000);
+        }
+    }
+
+    // Recovery
+    interface RecoveryResult {
+        success: boolean;
+        message: string;
+        details: string[];
+    }
+    let migrationRunning = false;
+    let migrationResult: RecoveryResult | null = null;
+    let pathFixRunning = false;
+    let pathFixResult: RecoveryResult | null = null;
+
+    async function runMigration() {
+        migrationRunning = true;
+        migrationResult = null;
+        try {
+            migrationResult = await invoke<RecoveryResult>('run_appdata_migration');
+        } catch (e) {
+            migrationResult = { success: false, message: String(e), details: [] };
+        } finally {
+            migrationRunning = false;
+        }
+    }
+
+    async function runFixPaths() {
+        pathFixRunning = true;
+        pathFixResult = null;
+        try {
+            pathFixResult = await invoke<RecoveryResult>('fix_broken_paths');
+        } catch (e) {
+            pathFixResult = { success: false, message: String(e), details: [] };
+        } finally {
+            pathFixRunning = false;
+        }
+    }
+
+    async function browseDataRoot() {
+        const result = await openDialog({ directory: true, title: 'Choose Data Root Folder' });
+        if (result) {
+            storageSaving = true;
+            try {
+                await setDataRoot(result as string);
+                storageRootChanged = true;
+                await loadLibraryLocations();
+            } finally {
+                storageSaving = false;
+            }
+        }
+    }
+
+    async function resetDataRoot() {
+        storageSaving = true;
+        try {
+            await setDataRoot(null);
+            storageRootChanged = true;
+            await loadLibraryLocations();
+        } finally {
+            storageSaving = false;
+        }
+    }
+
     async function openSourcesFolder() {
         await invoke('open_sources_folder');
     }
@@ -78,18 +200,18 @@
         }
     }
 
-    // Modal entrance: scale up with spring + fade
-    function modalIn(node: HTMLElement) {
-        node.style.opacity = '0';
-        animate(
-            node,
-            { opacity: [0, 1], scale: [0.94, 1], y: [10, 0] },
-            { duration: 0.32, easing: [0.22, 1, 0.36, 1] }
-        );
-    }
     let hasLoaded = false;
-    let justLoaded = false;
     let ssoAuthUnlisten: UnlistenFn | null = null;
+    let activeSection = 'storage';
+    let scrollContainer: HTMLElement;
+
+    function scrollToSection(id: string) {
+        activeSection = id;
+        const el = document.getElementById(id);
+        if (el && scrollContainer) {
+            scrollContainer.scrollTo({ top: el.offsetTop - 24, behavior: 'smooth' });
+        }
+    }
 
     function getIconComponent(iconName: string) {
         const pascalCase = iconName
@@ -102,16 +224,29 @@
     onMount(async () => {
         await setupSsoAuthListener();
         await loadSourcesFolderPath();
-    });
+        await loadStorageConfig();
+        await loadLibraryLocations();
+        await loadAllSettings();
 
-    $: if (isOpen) {
-        if (!hasLoaded && !loading) {
-            loadAllSettings();
-        } else if (hasLoaded && !justLoaded) {
-            refreshAllAuthStatus();
-        }
-        if (justLoaded) justLoaded = false;
-    }
+        // Track active section via scroll position
+        const observer = new IntersectionObserver(
+            (entries) => {
+                for (const entry of entries) {
+                    if (entry.isIntersecting) activeSection = entry.target.id;
+                }
+            },
+            { root: scrollContainer, rootMargin: '-20% 0px -60% 0px', threshold: 0 }
+        );
+        // Observe after a tick so IDs are rendered
+        setTimeout(() => {
+            ['section-storage', 'section-sources', 'section-source-settings', 'section-recovery'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) observer.observe(el);
+            });
+        }, 100);
+
+        return () => observer.disconnect();
+    });
 
     onDestroy(() => {
         if (ssoAuthUnlisten) ssoAuthUnlisten();
@@ -190,7 +325,6 @@
         sourceSettings = settings;
         loading = false;
         hasLoaded = true;
-        justLoaded = true;
     }
 
     function getDefaultForType(type: string): any {
@@ -270,14 +404,6 @@
         });
     }
 
-    function handleBackdropClick(e: MouseEvent) {
-        if (e.target === e.currentTarget) onClose();
-    }
-
-    function handleKeydown(e: KeyboardEvent) {
-        if (e.key === 'Escape') onClose();
-    }
-
     async function initAuthState(sourceId: string): Promise<AuthState> {
         const authState: AuthState = { isLoggedIn: false, isLoading: false };
         try {
@@ -352,178 +478,676 @@
     }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window on:click={() => { showRootPicker = false; }} />
 
-{#if isOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-        class="fixed inset-0 z-[100] flex items-center justify-center bg-black/80"
-        style="top: 32px;"
-        on:click={handleBackdropClick}
-    >
-        <div class="relative w-full max-w-xl max-h-[80vh] mx-4 sc-card overflow-hidden flex flex-col"
-             style="box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 8px 32px rgba(0,0,0,0.6), 0 24px 80px rgba(0,0,0,0.5);"
-             use:modalIn>
-            <!-- Header -->
-            <div class="flex items-center justify-between px-5 py-3.5 border-b border-white/8 flex-shrink-0">
-                <div class="flex items-center gap-2.5">
-                    <Settings size={15} class="text-white/50" />
-                    <div>
-                        <h2 class="text-xs font-bold text-white tracking-wider">SETTINGS</h2>
-                        <p class="text-[11px]" style="color: var(--label-tertiary);">Configure sources and preferences</p>
-                    </div>
+<div class="flex h-full overflow-hidden">
+
+    <!-- ── Left nav ────────────────────────────────────────────────────────── -->
+    <div class="flex flex-col shrink-0 overflow-y-auto"
+         style="width: 210px; background: var(--bg-sidebar); border-right: 1px solid var(--border-subtle);">
+        <nav class="p-3 flex flex-col gap-0.5">
+            <p class="nav-label">App</p>
+            <button class="nav-item" class:nav-active={activeSection === 'section-storage'}
+                    on:click={() => scrollToSection('section-storage')}>
+                <HardDrive size={14} /> Storage
+            </button>
+            <button class="nav-item" class:nav-active={activeSection === 'section-sources'}
+                    on:click={() => scrollToSection('section-sources')}>
+                <FolderOpen size={14} /> Sources
+            </button>
+            <button class="nav-item" class:nav-active={activeSection === 'section-recovery'}
+                    on:click={() => scrollToSection('section-recovery')}>
+                <Wrench size={14} /> Recovery
+            </button>
+
+            {#if sourceSettings.length > 0}
+                <p class="nav-label" style="margin-top: 16px;">Source Settings</p>
+                {#each sourceSettings as s}
+                    {@const src = getSource(s.sourceId)}
+                    {#if src}
+                        {@const Icon = getIconComponent(src.icon)}
+                        <button class="nav-item"
+                                class:nav-active={activeSection === 'section-source-settings'}
+                                on:click={() => scrollToSection('section-source-settings')}>
+                            <svelte:component this={Icon} size={13} style="color: {src.color}; flex-shrink: 0;" />
+                            <span class="flex-1 truncate">{src.name}</span>
+                            {#if hasConfiguredSettings(s)}
+                                <span style="width:6px;height:6px;border-radius:50%;background:#32d74b;flex-shrink:0;"></span>
+                            {:else if s.hasChanges}
+                                <span style="width:6px;height:6px;border-radius:50%;background:#ff9f0a;flex-shrink:0;"></span>
+                            {/if}
+                        </button>
+                    {/if}
+                {/each}
+            {/if}
+        </nav>
+    </div>
+
+    <!-- ── Right content ───────────────────────────────────────────────────── -->
+    <div class="flex-1 overflow-y-auto" bind:this={scrollContainer}>
+    <div style="padding: 36px 40px 96px;">
+
+    <!-- ══ Storage ══════════════════════════════════════════════════════════ -->
+    <section id="section-storage">
+        <div class="section-header">
+            <HardDrive size={14} style="color: #0a84ff; flex-shrink: 0; margin-top: 2px;" />
+            <div>
+                <h2 class="section-title">Storage</h2>
+                <p class="section-desc">Where ScrapStation stores your downloads and game library.</p>
+            </div>
+        </div>
+
+        <div class="settings-card">
+            <div class="settings-row">
+                <div class="settings-row-label">
+                    <span class="row-title">Data root</span>
+                    <span class="row-desc">
+                        {#if $storageConfig}
+                            {#if $storageConfig.data_root}
+                                <span class="path-text" title={$storageConfig.data_root}>{$storageConfig.data_root}</span>
+                            {:else}
+                                Default location <span class="path-text" style="display:inline;">(AppData)</span>
+                            {/if}
+                        {:else}
+                            Loading…
+                        {/if}
+                    </span>
                 </div>
-                <button on:click={onClose} class="p-1.5 rounded-subtle hover:bg-white/8 transition-colors">
-                    <X size={14} class="text-white/40" />
-                </button>
+                <div class="flex items-center gap-2">
+                    <div style="position: relative;">
+                        <button class="btn-secondary"
+                                on:click|stopPropagation={() => showRootPicker = !showRootPicker}
+                                disabled={storageSaving || ($downloadStats?.activeCount ?? 0) > 0}
+                                title={($downloadStats?.activeCount ?? 0) > 0 ? 'Pause downloads before changing storage location' : 'Change data root'}>
+                            <FolderOpen size={12} /> Change
+                        </button>
+                        {#if showRootPicker}
+                            <div class="move-dropdown" style="right: 0; left: auto; min-width: 220px;">
+                                {#if suggestedRoots.length > 0}
+                                    <div class="move-dropdown-header">Switch to location</div>
+                                    {#each suggestedRoots as root}
+                                        <button class="move-option" on:click={async () => { showRootPicker = false; storageSaving = true; try { await setDataRoot(root.path); await loadLibraryLocations(); storageRootChanged = true; } catch(e) { console.error(e); } finally { storageSaving = false; } }}>
+                                            <span style="font-size: 11px; font-weight: 600; color: var(--label-primary);">{root.path}</span>
+                                            <span style="font-size: 10px; color: var(--label-tertiary); margin-top: 1px;">{root.label}</span>
+                                        </button>
+                                    {/each}
+                                    <div style="height: 1px; background: var(--border-subtle); margin: 4px 0;"></div>
+                                {/if}
+                                <button class="move-option" on:click={async () => { showRootPicker = false; await browseDataRoot(); }}>
+                                    <span style="font-size: 11px; color: var(--label-primary); display: flex; align-items: center; gap: 6px;">
+                                        <FolderOpen size={11} /> Browse for custom folder…
+                                    </span>
+                                </button>
+                            </div>
+                        {/if}
+                    </div>
+                    {#if $storageConfig?.data_root}
+                        <button class="btn-secondary" on:click={resetDataRoot} disabled={storageSaving}>
+                            <RotateCcw size={12} /> Reset to default
+                        </button>
+                    {/if}
+                </div>
             </div>
 
-            <!-- Content -->
-            <div class="flex-1 overflow-y-auto p-4">
-                <!-- Sources Folder Card -->
-                <div class="mb-4 p-3 border border-white/8 rounded-subtle">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-2.5">
-                            <div class="w-7 h-7 rounded-subtle flex items-center justify-center border border-white/10 bg-white/5">
-                                <FolderOpen size={13} class="text-white/60" />
-                            </div>
-                            <div>
-                                <p class="text-xs font-medium text-white/80">Sources Folder</p>
-                                <p class="text-[11px] mt-0.5 font-mono truncate max-w-[280px]"
-                                   style="color: var(--label-tertiary);"
-                                   title={sourcesFolderPath}>{sourcesFolderPath || 'Loading...'}</p>
-                            </div>
-                        </div>
-                        <button
-                            on:click={openSourcesFolder}
-                            class="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium rounded-subtle border border-white/10 hover:bg-white/8 transition-colors"
-                            style="color: var(--label-secondary);"
-                            title="Open in file explorer"
-                        >
-                            <ExternalLink size={11} />
-                            Open
-                        </button>
+            {#if $storageConfig}
+                <div class="settings-row" style="gap: 24px; border-bottom: none;">
+                    <div class="flex-1 min-w-0">
+                        <p class="path-label">Downloads</p>
+                        <p class="path-text" title={$storageConfig.effective_download_path}>{$storageConfig.effective_download_path}</p>
                     </div>
-                    <p class="text-[11px] mt-2.5" style="color: var(--label-quaternary);">
-                        Drop your <span class="font-mono text-white/40">.yaml</span> source configs here. The app reloads them automatically.
-                    </p>
+                    <div style="width: 1px; align-self: stretch; background: var(--border-subtle); flex-shrink: 0;"></div>
+                    <div class="flex-1 min-w-0">
+                        <p class="path-label">Library</p>
+                        <p class="path-text" title={$storageConfig.effective_library_path}>{$storageConfig.effective_library_path}</p>
+                    </div>
                 </div>
+            {/if}
+        </div>
+        <p class="hint-text">Changes apply to new operations only — existing files stay where they are.</p>
 
-                {#if loading}
-                    <div class="flex items-center justify-center py-10">
-                        <div class="w-6 h-6 rounded-full animate-spin"
-                             style="border: 1.5px solid rgba(255,255,255,0.1); border-top-color: rgba(255,255,255,0.5);"></div>
+        <!-- Known library locations -->
+        <div class="settings-card" style="margin-top: 12px;">
+            <div class="settings-row" style="{knownLibraryLocations.length === 0 ? 'border-bottom: none;' : ''}">
+                <div class="settings-row-label">
+                    <span class="row-title">Library locations</span>
+                    <span class="row-desc">All ScrapStation library folders the app manages. Games can be moved between them.</span>
+                </div>
+                <button class="btn-secondary" on:click={handleAddLibraryLocation} disabled={addingLocation}>
+                    <Plus size={12} /> Add folder
+                </button>
+            </div>
+            {#each knownLibraryLocations as loc, i}
+                <div class="settings-row" style="{i === knownLibraryLocations.length - 1 ? 'border-bottom: none;' : ''}">
+                    <div class="settings-row-label" style="gap: 6px;">
+                        <span class="row-title flex items-center gap-2">
+                            {loc.label}
+                            {#if loc.is_current}
+                                <span style="font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+                                             padding: 2px 6px; border-radius: 4px; background: rgba(10,132,255,0.15); color: #0a84ff;">
+                                    Active
+                                </span>
+                            {:else if !loc.removable}
+                                <span style="font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+                                             padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.06); color: var(--label-quaternary);">
+                                    Auto
+                                </span>
+                            {/if}
+                        </span>
+                        <span class="path-text" title={loc.path}>{loc.path}</span>
                     </div>
-                {:else if sourceSettings.length === 0}
-                    <div class="flex flex-col items-center justify-center py-10 text-center">
-                        <Settings size={32} class="mb-3" style="color: var(--label-quaternary);" />
-                        <p class="text-[12px]" style="color: var(--label-tertiary);">No configurable sources</p>
-                        <p class="text-[11px] mt-1" style="color: var(--label-tertiary);">Sources can define settings in their YAML configuration</p>
+                    {#if loc.removable}
+                        <button class="btn-icon-sm"
+                                on:click={() => handleRemoveLibraryLocation(loc.path)}
+                                title="Remove from known locations (does not delete files)">
+                            <Trash2 size={12} />
+                        </button>
+                    {/if}
+                </div>
+            {/each}
+        </div>
+        {#if locationError}
+            <p style="font-size: 11px; color: #ff453a; margin: 6px 0 0;">{locationError}</p>
+        {/if}
+
+        {#if storageRootChanged}
+            <div class="storage-warning">
+                <AlertCircle size={13} style="flex-shrink: 0; margin-top: 1px;" />
+                <div>
+                    <p style="font-size: 12px; font-weight: 500; margin: 0 0 3px;">Your existing library still points to the previous location</p>
+                    <p style="font-size: 11px; margin: 0; opacity: 0.8;">Games already in your library are still at their original location and will continue to work. New installs will go to the new path.</p>
+                </div>
+                <button on:click={() => storageRootChanged = false}
+                        style="flex-shrink: 0; background: none; border: none; cursor: pointer; color: inherit; opacity: 0.6; padding: 0; line-height: 1;">✕</button>
+            </div>
+        {/if}
+    </section>
+
+    <div class="subsection-divider"></div>
+
+    <!-- ══ Sources ══════════════════════════════════════════════════════════ -->
+    <section id="section-sources">
+        <div class="section-header">
+            <FolderOpen size={14} style="color: #32d74b; flex-shrink: 0; margin-top: 2px;" />
+            <div>
+                <h2 class="section-title">Sources</h2>
+                <p class="section-desc">Drop <code>.yaml</code> config files here to install sources. The app reloads them automatically.</p>
+            </div>
+        </div>
+
+        <div class="settings-card">
+            <div class="settings-row" style="border-bottom: none;">
+                <div class="settings-row-label">
+                    <span class="row-title">Sources folder</span>
+                    <span class="row-desc path-text" title={sourcesFolderPath}>{sourcesFolderPath || 'Loading…'}</span>
+                </div>
+                <button class="btn-secondary" on:click={openSourcesFolder}>
+                    <ExternalLink size={12} /> Open folder
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <div class="subsection-divider"></div>
+
+    <!-- ══ Recovery ══════════════════════════════════════════════════════════ -->
+    <section id="section-recovery">
+        <div class="section-header">
+            <Wrench size={14} style="color: #ff9f0a; flex-shrink: 0; margin-top: 2px;" />
+            <div>
+                <h2 class="section-title">Recovery</h2>
+                <p class="section-desc">Tools to fix your library or downloads if they appear broken after an update or storage move.</p>
+            </div>
+        </div>
+
+        <div class="flex flex-col gap-3">
+            <div class="settings-card">
+                <div class="settings-row" style="border-bottom: {migrationResult ? '1px solid var(--border-subtle)' : 'none'};">
+                    <div class="settings-row-label">
+                        <span class="row-title">Migrate AppData folder</span>
+                        <span class="row-desc">Moves files from the old <code>com.scrapstation.app</code> folder to the current one.</span>
                     </div>
-                {:else}
-                    <div class="space-y-2">
-                        {#each sourceSettings as sourceConfig}
-                            {@const source = getSource(sourceConfig.sourceId)}
-                            {#if source}
-                                {@const IconComponent = getIconComponent(source.icon)}
-                                <div class="border rounded-subtle overflow-hidden transition-colors
-                                    {sourceConfig.hasChanges ? 'border-amber-400/25' : hasConfiguredSettings(sourceConfig) ? 'border-green-400/15' : 'border-white/8'}">
+                    <button class="btn-secondary" on:click={runMigration} disabled={migrationRunning} style="flex-shrink: 0;">
+                        {#if migrationRunning}
+                            <div class="spin" style="width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.15); border-top-color: rgba(255,255,255,0.6);"></div>
+                        {:else}
+                            <Wrench size={12} />
+                        {/if}
+                        Run
+                    </button>
+                </div>
+                {#if migrationResult}
+                    <div class="result-block">
+                        <p class="result-line" style="color: {migrationResult.success ? '#32d74b' : '#ff453a'};">
+                            {#if migrationResult.success}<CheckCircle size={12} />{:else}<XCircle size={12} />{/if}
+                            {migrationResult.message}
+                        </p>
+                        {#each migrationResult.details as detail}
+                            <p class="result-detail">· {detail}</p>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
 
-                                    <!-- Source Header -->
-                                    <button
-                                        on:click={() => toggleExpanded(sourceConfig.sourceId)}
-                                        class="w-full flex items-center justify-between p-3 hover:bg-white/3 transition-colors"
-                                    >
-                                        <div class="flex items-center gap-2.5">
-                                            <div class="w-7 h-7 rounded-subtle flex items-center justify-center border"
-                                                style="border-color: {source.color}25; background: {source.color}0a;">
-                                                <svelte:component this={IconComponent} size={14} style="color: {source.color};" />
-                                            </div>
-                                            <div class="text-left">
-                                                <span class="text-xs font-medium text-white/80">{source.name}</span>
-                                                <div class="flex items-center gap-1.5 mt-0.5">
-                                                    {#if hasConfiguredSettings(sourceConfig)}
-                                                        <span class="flex items-center gap-0.5 text-[11px]" style="color: #32d74b;">
-                                                            <Check size={10} /> Configured
-                                                        </span>
-                                                    {:else}
-                                                        <span class="text-[11px]" style="color: var(--label-tertiary);">Not configured</span>
-                                                    {/if}
-                                                    {#if sourceConfig.hasChanges}
-                                                        <span class="text-[11px]" style="color: #ff9f0a;">· Unsaved changes</span>
-                                                    {/if}
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div style="color: var(--label-tertiary);">
-                                            {#if sourceConfig.expanded}<ChevronDown size={16} />{:else}<ChevronRight size={16} />{/if}
-                                        </div>
-                                    </button>
+            <div class="settings-card">
+                <div class="settings-row" style="border-bottom: {pathFixResult ? '1px solid var(--border-subtle)' : 'none'};">
+                    <div class="settings-row-label">
+                        <span class="row-title">Fix broken paths</span>
+                        <span class="row-desc">Converts legacy relative paths to absolute in the library database so games are always found regardless of data root.</span>
+                    </div>
+                    <button class="btn-secondary" on:click={runFixPaths} disabled={pathFixRunning} style="flex-shrink: 0;">
+                        {#if pathFixRunning}
+                            <div class="spin" style="width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.15); border-top-color: rgba(255,255,255,0.6);"></div>
+                        {:else}
+                            <Wrench size={12} />
+                        {/if}
+                        Run
+                    </button>
+                </div>
+                {#if pathFixResult}
+                    <div class="result-block">
+                        <p class="result-line" style="color: {pathFixResult.success ? '#32d74b' : '#ff453a'};">
+                            {#if pathFixResult.success}<CheckCircle size={12} />{:else}<XCircle size={12} />{/if}
+                            {pathFixResult.message}
+                        </p>
+                        {#each pathFixResult.details as detail}
+                            <p class="result-detail">· {detail}</p>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+        </div>
+    </section>
 
-                                    <!-- Settings Fields -->
-                                    {#if sourceConfig.expanded}
-                                        <div class="px-3 pb-3 space-y-3 border-t border-white/5">
-                                            {#if sourceConfig.settingSections && sourceConfig.settingSections.length > 0}
-                                                <div class="pt-3">
-                                                    <SettingSectionRenderer sourceId={sourceConfig.sourceId} sections={sourceConfig.settingSections} />
-                                                </div>
+    <!-- ══ Source settings ══════════════════════════════════════════════════ -->
+    {#if loading || sourceSettings.length > 0}
+        <div class="section-divider"></div>
+    {/if}
+
+    {#if loading}
+        <section id="section-source-settings">
+            <div class="section-header">
+                <div class="spin" style="width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.1); border-top-color: rgba(255,255,255,0.5); flex-shrink: 0; margin-top: 2px;"></div>
+                <div>
+                    <h2 class="section-title">Source Settings</h2>
+                    <p class="section-desc">Loading per-source configuration…</p>
+                </div>
+            </div>
+        </section>
+    {:else if sourceSettings.length > 0}
+        <section id="section-source-settings">
+            <div class="section-header">
+                <Settings size={14} style="color: #5e5ce6; flex-shrink: 0; margin-top: 2px;" />
+                <div>
+                    <h2 class="section-title">Source Settings</h2>
+                    <p class="section-desc">Per-source configuration — each source defines its own fields in its YAML file.</p>
+                </div>
+            </div>
+
+            <div class="flex flex-col gap-3">
+                {#each sourceSettings as sourceConfig}
+                    {@const source = getSource(sourceConfig.sourceId)}
+                    {#if source}
+                        {@const IconComponent = getIconComponent(source.icon)}
+                        <div id="source-{sourceConfig.sourceId}" class="settings-card" style="
+                            border-color: {sourceConfig.hasChanges
+                                ? 'rgba(255,159,10,0.35)'
+                                : hasConfiguredSettings(sourceConfig)
+                                    ? 'rgba(50,215,75,0.25)'
+                                    : 'rgba(255,255,255,0.08)'};
+                        ">
+                            <button class="settings-row w-full text-left"
+                                    style="border-bottom: {sourceConfig.expanded ? '1px solid var(--border-subtle)' : 'none'}; cursor: pointer;"
+                                    on:click={() => toggleExpanded(sourceConfig.sourceId)}>
+                                <div class="flex items-center gap-3">
+                                    <div style="width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; background: {source.color}12; border: 1px solid {source.color}28; flex-shrink: 0;">
+                                        <svelte:component this={IconComponent} size={15} style="color: {source.color};" />
+                                    </div>
+                                    <div>
+                                        <p style="font-size: 13px; font-weight: 500; color: var(--label-primary);">{source.name}</p>
+                                        <div class="flex items-center gap-2 mt-0.5">
+                                            {#if hasConfiguredSettings(sourceConfig)}
+                                                <span style="font-size: 11px; color: #32d74b; display: flex; align-items: center; gap: 4px;">
+                                                    <Check size={10} /> Configured
+                                                </span>
                                             {:else}
-                                                {#each sourceConfig.schema as setting}
-                                                    <LegacySettingField
-                                                        {setting}
-                                                        value={sourceConfig.editValues[setting.id] || ''}
-                                                        showSecret={sourceConfig.showSecrets[setting.id] || false}
-                                                        authState={sourceConfig.authState}
-                                                        onValueChange={(v) => updateValue(sourceConfig.sourceId, setting.id, v)}
-                                                        onToggleSecret={() => toggleSecret(sourceConfig.sourceId, setting.id)}
-                                                        onLogout={() => handleLogout(sourceConfig.sourceId)}
-                                                        onSsoLogin={(pid) => handleSsoLogin(sourceConfig.sourceId, pid)}
-                                                        onRefreshAuthStatus={() => refreshAuthStatus(sourceConfig.sourceId)}
-                                                    />
-                                                {/each}
+                                                <span style="font-size: 11px; color: var(--label-quaternary);">Not configured</span>
                                             {/if}
-
                                             {#if sourceConfig.hasChanges}
-                                                <div class="flex justify-end gap-2 pt-3 border-t border-white/5">
-                                                    <button
-                                                        on:click={() => resetSettings(sourceConfig.sourceId)}
-                                                        class="btn-secondary flex items-center gap-1.5 text-[11px]"
-                                                        style="padding: 5px 12px;"
-                                                        disabled={sourceConfig.isSaving}
-                                                    >
-                                                        <RotateCcw size={12} /> Reset
-                                                    </button>
-                                                    <button
-                                                        on:click={() => saveSettings(sourceConfig.sourceId)}
-                                                        class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-subtle bg-white text-black hover:bg-gray-200 transition-colors disabled:opacity-50"
-                                                        disabled={sourceConfig.isSaving}
-                                                    >
-                                                        <Save size={12} /> {sourceConfig.isSaving ? 'Saving...' : 'Save'}
-                                                    </button>
-                                                </div>
+                                                <span style="font-size: 11px; color: #ff9f0a;">· Unsaved changes</span>
                                             {/if}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div style="color: var(--label-tertiary);">
+                                    {#if sourceConfig.expanded}<ChevronDown size={15} />{:else}<ChevronRight size={15} />{/if}
+                                </div>
+                            </button>
+
+                            {#if sourceConfig.expanded}
+                                <div style="padding: 16px;">
+                                    {#if sourceConfig.settingSections && sourceConfig.settingSections.length > 0}
+                                        <SettingSectionRenderer sourceId={sourceConfig.sourceId} sections={sourceConfig.settingSections} />
+                                    {:else}
+                                        <div class="flex flex-col gap-3">
+                                            {#each sourceConfig.schema as setting}
+                                                <LegacySettingField
+                                                    {setting}
+                                                    value={sourceConfig.editValues[setting.id] || ''}
+                                                    showSecret={sourceConfig.showSecrets[setting.id] || false}
+                                                    authState={sourceConfig.authState}
+                                                    onValueChange={(v) => updateValue(sourceConfig.sourceId, setting.id, v)}
+                                                    onToggleSecret={() => toggleSecret(sourceConfig.sourceId, setting.id)}
+                                                    onLogout={() => handleLogout(sourceConfig.sourceId)}
+                                                    onSsoLogin={(pid) => handleSsoLogin(sourceConfig.sourceId, pid)}
+                                                    onRefreshAuthStatus={() => refreshAuthStatus(sourceConfig.sourceId)}
+                                                />
+                                            {/each}
+                                        </div>
+                                    {/if}
+                                    {#if sourceConfig.hasChanges}
+                                        <div class="flex justify-end gap-2 mt-4 pt-4" style="border-top: 1px solid var(--border-subtle);">
+                                            <button class="btn-secondary" on:click={() => resetSettings(sourceConfig.sourceId)} disabled={sourceConfig.isSaving}>
+                                                <RotateCcw size={12} /> Discard
+                                            </button>
+                                            <button class="btn-primary" on:click={() => saveSettings(sourceConfig.sourceId)} disabled={sourceConfig.isSaving}>
+                                                <Save size={12} /> {sourceConfig.isSaving ? 'Saving…' : 'Save changes'}
+                                            </button>
                                         </div>
                                     {/if}
                                 </div>
                             {/if}
-                        {/each}
-                    </div>
-                {/if}
-
-                {#if !loading && sourceSettings.length > 0}
-                    <div class="mt-4 p-3 border border-white/5 rounded-subtle">
-                        <div class="flex items-start gap-2">
-                            <AlertCircle size={13} class="mt-0.5 flex-shrink-0" style="color: var(--label-tertiary);" />
-                            <div class="text-[11px]" style="color: var(--label-tertiary);">
-                                <p>Settings are defined by each source in their configuration file.</p>
-                                <p class="mt-0.5">Changes are saved per-source and persist between sessions.</p>
-                            </div>
                         </div>
-                    </div>
-                {/if}
-
+                    {/if}
+                {/each}
             </div>
-        </div>
-    </div>
-{/if}
+        </section>
+    {/if}
+
+
+</div>
+    </div><!-- /right scroll -->
+</div><!-- /flex wrapper -->
+
+<style>
+    .settings-card {
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(255,255,255,0.02);
+        overflow: hidden;
+    }
+
+    .settings-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .settings-row-label {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+        flex: 1;
+    }
+
+    .row-title {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--label-primary);
+    }
+
+    .row-desc {
+        font-size: 12px;
+        color: var(--label-tertiary);
+    }
+
+    .path-text {
+        font-family: ui-monospace, 'Cascadia Code', monospace;
+        font-size: 11px;
+        color: var(--label-quaternary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: block;
+    }
+
+    code {
+        font-family: ui-monospace, 'Cascadia Code', monospace;
+        font-size: 11px;
+        background: rgba(255,255,255,0.07);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 4px;
+        padding: 1px 5px;
+        color: var(--label-secondary);
+    }
+
+    .btn-secondary {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--label-secondary);
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+        white-space: nowrap;
+    }
+    .btn-secondary:hover:not(:disabled) {
+        background: rgba(255,255,255,0.09);
+        color: var(--label-primary);
+    }
+    .btn-secondary:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    .btn-primary {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #000;
+        background: #fff;
+        border: 1px solid transparent;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background 0.15s;
+        white-space: nowrap;
+    }
+    .btn-primary:hover:not(:disabled) { background: #e8e8e8; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-icon-sm {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: transparent;
+        color: var(--label-tertiary);
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: background 0.12s, color 0.12s;
+    }
+    .btn-icon-sm:hover {
+        background: rgba(255,69,58,0.12);
+        color: #ff453a;
+        border-color: rgba(255,69,58,0.25);
+    }
+
+    /* ── Section layout ──────────────────────────────────────────────────── */
+    .section-header {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        margin-bottom: 16px;
+    }
+
+    .section-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--label-primary);
+        letter-spacing: -0.01em;
+        margin: 0 0 3px;
+        line-height: 1.2;
+    }
+
+    .section-desc {
+        font-size: 12px;
+        color: var(--label-tertiary);
+        margin: 0;
+        line-height: 1.5;
+    }
+
+    .hint-text {
+        font-size: 11px;
+        color: var(--label-quaternary);
+        margin: 8px 2px 0;
+    }
+
+    .storage-warning {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        margin-top: 12px;
+        padding: 12px 14px;
+        border-radius: 9px;
+        background: rgba(255, 159, 10, 0.08);
+        border: 1px solid rgba(255, 159, 10, 0.25);
+        color: #ff9f0a;
+    }
+
+    .path-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--label-quaternary);
+        margin: 0 0 4px;
+    }
+
+    .section-divider {
+        margin: 32px -40px;
+        height: 1px;
+        background: var(--border-subtle);
+    }
+
+    .subsection-divider {
+        margin: 28px 0;
+        height: 1px;
+        background: var(--border-subtle);
+    }
+
+    /* ── Result blocks ───────────────────────────────────────────────────── */
+    .result-block {
+        padding: 12px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        background: rgba(255,255,255,0.015);
+    }
+
+    .result-line {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        margin: 0;
+    }
+
+    .result-detail {
+        font-size: 11px;
+        color: var(--label-quaternary);
+        padding-left: 18px;
+        margin: 0;
+    }
+
+    .spin { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    section h2 { margin: 0; }
+
+    .nav-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--label-quaternary);
+        padding: 4px 10px 2px;
+        margin-top: 4px;
+    }
+
+    .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        text-align: left;
+        padding: 7px 10px;
+        border-radius: 7px;
+        font-size: 13px;
+        color: var(--label-secondary);
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        transition: background 0.12s, color 0.12s;
+    }
+    .nav-item:hover { background: rgba(255,255,255,0.06); color: var(--label-primary); }
+    .nav-active {
+        background: rgba(255,255,255,0.07) !important;
+        color: var(--label-primary) !important;
+        font-weight: 500;
+        box-shadow: inset 2px 0 0 rgba(255,255,255,0.25);
+    }
+
+    /* ── Root picker dropdown ────────────────────────────────────────────── */
+    .move-dropdown {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        z-index: 200;
+        background: #1c1c1e;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 10px;
+        padding: 6px;
+        min-width: 200px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+
+    .move-dropdown-header {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--label-quaternary);
+        padding: 4px 8px 6px;
+    }
+
+    .move-option {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        width: 100%;
+        text-align: left;
+        padding: 8px 10px;
+        border-radius: 7px;
+        border: none;
+        background: transparent;
+        cursor: pointer;
+        transition: background 0.12s;
+        color: var(--label-primary);
+    }
+    .move-option:hover { background: rgba(255,255,255,0.07); }
+</style>

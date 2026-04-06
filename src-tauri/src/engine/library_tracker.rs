@@ -105,12 +105,17 @@ impl LibraryTracker {
         let db: LibraryDb = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse library db: {}", e))?;
 
-        let mut games = self.games.write().await;
-        for game in db.games {
-            games.insert(game.id.clone(), game);
-        }
+        {
+            let mut games = self.games.write().await;
+            for game in db.games {
+                games.insert(game.id.clone(), game);
+            }
+            log::info!("[LibraryTracker] Loaded {} games from disk", games.len());
+        } // release write lock before emitting
 
-        log::info!("[LibraryTracker] Loaded {} games from disk", games.len());
+        // Push loaded state to the frontend in case it already called
+        // get_library_games before this async task completed (race on startup).
+        self.emit_library_update().await;
         Ok(())
     }
 
@@ -209,6 +214,18 @@ impl LibraryTracker {
     }
 
     /// Update game status
+    pub async fn update_install_path(&self, id: &str, path: &str) -> Result<(), String> {
+        {
+            let mut games = self.games.write().await;
+            if let Some(game) = games.get_mut(id) {
+                game.install_path = path.to_string();
+            } else {
+                return Err(format!("Game not found: {}", id));
+            }
+        }
+        self.save().await
+    }
+
     pub async fn update_status(&self, id: &str, status: LibraryGameStatus) -> Result<(), String> {
         {
             let mut games = self.games.write().await;
@@ -361,6 +378,47 @@ impl LibraryTracker {
         Ok(())
     }
 
+    /// Normalize all stored install_path values: convert legacy relative paths → absolute.
+    /// Returns how many entries were changed. Saves the DB if any were changed.
+    pub async fn normalize_paths(&self) -> usize {
+        // Collect all known library roots to probe for legacy relative paths
+        let all_roots = crate::api::settings_commands::all_library_paths(&self.app_handle);
+        let mut fixed = 0usize;
+        {
+            let mut games = self.games.write().await;
+            for game in games.values_mut() {
+                // Clone to release the borrow on game before we can assign back
+                let stored = game.install_path.clone();
+                let path = std::path::Path::new(&stored);
+                if path.is_absolute() {
+                    continue;
+                }
+                // Legacy relative path: try each known library root until we find the
+                // actual folder on disk, then store the absolute path.
+                let mut resolved = false;
+                for root in &all_roots {
+                    let candidate = root.join(path);
+                    if candidate.exists() {
+                        game.install_path = candidate.to_string_lossy().to_string();
+                        fixed += 1;
+                        resolved = true;
+                        break;
+                    }
+                }
+                if !resolved {
+                    // Fall back to current library root so the entry isn't permanently broken
+                    let current = get_library_folder(&self.app_handle);
+                    game.install_path = current.join(path).to_string_lossy().to_string();
+                    fixed += 1;
+                }
+            }
+        }
+        if fixed > 0 {
+            let _ = self.save().await;
+        }
+        fixed
+    }
+
     /// Emit library update event to frontend
     pub async fn emit_library_update(&self) {
         let games = self.get_all_games().await;
@@ -377,18 +435,25 @@ fn get_library_db_path(app_handle: &AppHandle) -> PathBuf {
     app_data.join("library.json")
 }
 
-/// Get the library folder path (where games are installed)
+/// Get the library folder path (where games are installed), respecting the user's custom data root.
 pub fn get_library_folder(app_handle: &AppHandle) -> PathBuf {
-    let app_data = app_handle.path().app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let library_dir = app_data.join("Library");
-
-    // Create the directory if it doesn't exist
-    if !library_dir.exists() {
-        let _ = std::fs::create_dir_all(&library_dir);
+    let dir = crate::settings::UserSettings::resolve_scrapstation_root(app_handle)
+        .join("Library");
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
     }
+    dir
+}
 
-    library_dir
+/// Resolve a LibraryGame's stored install_path to an absolute filesystem path.
+/// Stored paths are relative (e.g. "the-witcher-3/game"). Legacy absolute paths are kept as-is.
+pub fn resolve_install_path(game: &LibraryGame, app_handle: &AppHandle) -> PathBuf {
+    let path = PathBuf::from(&game.install_path);
+    if path.is_absolute() {
+        path
+    } else {
+        get_library_folder(app_handle).join(path)
+    }
 }
 
 /// Generate a unique library game ID from source info

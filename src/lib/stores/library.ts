@@ -50,6 +50,8 @@ function toFrontendFormat(g: LibraryGameBackend): LibraryGame {
 
 export const libraryGames = writable<LibraryGame[]>([]);
 export const extractionProgress = writable<Map<string, ExtractionProgress>>(new Map());
+// Per-game extraction error messages (keyed by game ID, cleared on success)
+export const extractionErrors = writable<Map<string, string>>(new Map());
 
 // Derived: Only ready games
 export const readyGames = derived(libraryGames, $games =>
@@ -241,6 +243,24 @@ export async function getLibraryFolderPath(): Promise<string> {
     return invoke<string>('get_library_folder_path');
 }
 
+// Open library folder in file explorer
+export async function openLibraryFolder(): Promise<void> {
+    await invoke('open_library_folder');
+}
+
+// Move a game's install folder to a new parent directory
+export async function moveGame(gameId: string, targetDir: string): Promise<string> {
+    return await invoke<string>('move_game', { gameId, targetDir });
+}
+
+// Repair library: scan Library folder for game directories not in the database
+// Returns the number of games recovered
+export async function repairLibrary(): Promise<number> {
+    const count = await invoke<number>('repair_library');
+    await loadLibrary();
+    return count;
+}
+
 // Format playtime
 export function formatPlaytime(seconds: number): string {
     if (seconds < 60) return 'Less than a minute';
@@ -392,6 +412,17 @@ export async function initLibraryEvents(): Promise<void> {
             return newMap;
         });
 
+        // Clear any extraction error for this game (keyed by group key)
+        const game = get(libraryGames).find(g => g.id === gameId);
+        if (game) {
+            const groupKey = `${game.source_slug}_${game.title}`;
+            extractionErrors.update(map => {
+                const newMap = new Map(map);
+                newMap.delete(groupKey);
+                return newMap;
+            });
+        }
+
         // Reload library to get updated state
         loadLibrary();
 
@@ -410,7 +441,7 @@ export async function initLibraryEvents(): Promise<void> {
     });
 
     // Listen for extraction errors
-    await listen<{ gameId: string; error: string }>('extraction-error', (event) => {
+    await listen<{ gameId: string; error: string }>('extraction-error', async (event) => {
         const { gameId, error } = event.payload;
 
         // Remove from progress tracking
@@ -419,5 +450,24 @@ export async function initLibraryEvents(): Promise<void> {
             newMap.delete(gameId);
             return newMap;
         });
+
+        // Find the download group key (sourceId_gameTitle) while the game is still in the store.
+        // The backend emits extraction-error BEFORE removing the game, so it's still accessible here.
+        const game = get(libraryGames).find(g => g.id === gameId);
+        const groupKey = game ? `${game.source_slug}_${game.title}` : gameId;
+
+        // Store the error keyed by group key so DownloadsPage can display it even after
+        // the library entry is removed.
+        const isDiskSpace = error.startsWith('disk_space:');
+        extractionErrors.update(map => {
+            const newMap = new Map(map);
+            newMap.set(groupKey, isDiskSpace
+                ? 'Not enough disk space to extract.'
+                : 'Extraction failed.');
+            return newMap;
+        });
+
+        // Reload library — game will be removed, triggering library-updated
+        await loadLibrary();
     });
 }

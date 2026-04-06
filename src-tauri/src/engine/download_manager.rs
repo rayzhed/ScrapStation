@@ -155,6 +155,30 @@ impl DownloadManager {
         }
     }
 
+    /// Resolve a URL through the host-level resolver for size probing.
+    /// Returns the direct download URL if the host has a non-browser resolver,
+    /// or the original URL if no resolver applies.
+    /// This mirrors what `smart_download` does but without actually downloading.
+    pub async fn resolve_for_probe(
+        &self,
+        url: &str,
+        hosts_config: Option<&HostsConfig>,
+    ) -> String {
+        let (_detected, host_config) = host_detector::detect_host_with_config(url, hosts_config);
+        if let Some(config) = host_config {
+            // Skip browser-only hosts — their URLs can't be resolved statically
+            if config.browser_only {
+                return url.to_string();
+            }
+            if let Some(resolver) = &config.resolver {
+                if let Ok(direct_url) = self.resolve_download_url(url, resolver).await {
+                    return direct_url;
+                }
+            }
+        }
+        url.to_string()
+    }
+
     /// Resolve download URL using host resolver steps
     async fn resolve_download_url(
         &self,
@@ -559,6 +583,38 @@ pub enum StreamingDownloadError {
 /// Progress callback type
 pub type ProgressCallback = Box<dyn Fn(u64, u64, u64) + Send + Sync>;
 
+/// Returns true if the IO error is a disk-full / out-of-space error.
+fn is_disk_full(e: &std::io::Error) -> bool {
+    // Stable kind check (Rust 1.74+)
+    if e.kind() == std::io::ErrorKind::StorageFull {
+        return true;
+    }
+    // Raw OS error: Windows ERROR_DISK_FULL=112, ERROR_HANDLE_DISK_FULL=39; Unix ENOSPC=28
+    if let Some(code) = e.raw_os_error() {
+        #[cfg(windows)]
+        if code == 112 || code == 39 { return true; }
+        #[cfg(unix)]
+        if code == 28 { return true; }
+    }
+    // String fallback for anything else
+    let s = e.to_string().to_lowercase();
+    s.contains("no space left") || s.contains("disk is full")
+        || s.contains("not enough space") || s.contains("there is not enough space")
+        || s.contains("insufficient")
+}
+
+/// Wrap an IO error into a `StreamingDownloadError`, tagging disk-full with the
+/// `disk_space:` prefix so the frontend can show a specific message.
+fn streaming_io_error(e: std::io::Error, context: &str) -> StreamingDownloadError {
+    if is_disk_full(&e) {
+        StreamingDownloadError::Error(
+            "disk_space: Not enough disk space. Free up space on the destination drive and retry.".to_string()
+        )
+    } else {
+        StreamingDownloadError::Error(format!("{}: {}", context, e))
+    }
+}
+
 /// Streaming download with pause/cancel support
 /// This is the proper download function that should be used for tracked downloads
 /// Returns Ok on success, or Err with detailed info on pause/cancel/error
@@ -569,15 +625,21 @@ pub async fn streaming_download(
     download_id: String,
     signals: Arc<Mutex<HashMap<String, DownloadSignal>>>,
     progress_callback: Option<ProgressCallback>,
+    cookies: Option<String>,
 ) -> Result<StreamingDownloadResult, StreamingDownloadError> {
     use std::io::Write;
-    use reqwest::header::{HeaderMap, HeaderValue};
+    use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
 
     log::info!("[StreamingDownload] Starting download: {} -> {:?}", url, download_dir);
 
     // Create client with proper headers
     let mut headers = HeaderMap::new();
     headers.insert("User-Agent", HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"));
+    if let Some(ref c) = cookies {
+        if let Ok(v) = HeaderValue::from_str(c) {
+            headers.insert(COOKIE, v);
+        }
+    }
 
     let client = reqwest::Client::builder()
         .default_headers(headers)
@@ -607,7 +669,7 @@ pub async fn streaming_download(
     // Ensure download dir exists
     if !download_dir.exists() {
         std::fs::create_dir_all(&download_dir)
-            .map_err(|e| StreamingDownloadError::Error(format!("Failed to create download directory: {}", e)))?;
+            .map_err(|e| streaming_io_error(e, "Failed to create download directory"))?;
     }
 
     let file_path = download_dir.join(&filename);
@@ -620,7 +682,7 @@ pub async fn streaming_download(
 
     // Create file
     let mut file = std::fs::File::create(&final_path)
-        .map_err(|e| StreamingDownloadError::Error(format!("Failed to create file: {}", e)))?;
+        .map_err(|e| streaming_io_error(e, "Failed to create file"))?;
 
     // Stream download
     let mut stream = response.bytes_stream();
@@ -659,8 +721,8 @@ pub async fn streaming_download(
             }
         }
 
-        let chunk = chunk_result.map_err(|e| StreamingDownloadError::Error(format!("Download error: {}", e)))?;
-        file.write_all(&chunk).map_err(|e| StreamingDownloadError::Error(format!("Write error: {}", e)))?;
+        let chunk = chunk_result.map_err(|e| StreamingDownloadError::Error(format!("Network error: {}", e)))?;
+        file.write_all(&chunk).map_err(|e| streaming_io_error(e, "Write error"))?;
         downloaded += chunk.len() as u64;
 
         // Emit progress every 250ms
@@ -676,7 +738,7 @@ pub async fn streaming_download(
         }
     }
 
-    file.flush().map_err(|e| StreamingDownloadError::Error(format!("Flush error: {}", e)))?;
+    file.flush().map_err(|e| streaming_io_error(e, "Flush error"))?;
 
     log::info!("[StreamingDownload] Completed: {} ({} bytes)", actual_filename, downloaded);
 

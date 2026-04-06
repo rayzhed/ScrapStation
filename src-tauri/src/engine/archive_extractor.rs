@@ -488,6 +488,11 @@ impl ArchiveExtractor {
                         || lower.contains("incorrect")
                     {
                         ExtractionError::WrongPassword
+                    } else if lower.contains("no space left") || lower.contains("disk is full")
+                        || lower.contains("not enough space") || lower.contains("there is not enough space")
+                        || lower.contains("insufficient")
+                    {
+                        ExtractionError::IoError(err_str)
                     } else {
                         ExtractionError::CorruptedArchive(err_str)
                     }

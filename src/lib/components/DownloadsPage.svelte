@@ -24,6 +24,7 @@
     import {
         extractToLibrary,
         extractionProgress,
+        extractionErrors,
         libraryGames,
     } from '$lib/stores/library';
     import type { DownloadGroup } from '$lib/types';
@@ -308,6 +309,7 @@
                     {@const isExpanded = expandedGroup === group.gameId}
                     {@const isExtracting = extractingGroups.has(group.gameId) || group.status === 'extracting'}
                     {@const extractProgress = progress.get(group.libraryGameId || '')}
+                    {@const extractError = $extractionErrors.get(group.gameId)}
                     {@const totalSpeed = group.downloads.reduce((sum, d) => sum + (d.status === 'downloading' ? d.speed : 0), 0)}
                     {@const progressGrad = getProgressGradient(group.status)}
 
@@ -415,6 +417,11 @@
                                             </div>
                                         {/if}
                                     </div>
+                                {:else if extractError}
+                                    <div class="text-[11px] flex items-center gap-1.5 max-w-[200px]" style="color: #ff453a;">
+                                        <AlertCircle size={12} class="shrink-0" />
+                                        <span class="truncate">{extractError}</span>
+                                    </div>
                                 {:else if group.status === 'queued'}
                                     <span class="text-[11px]" style="color: var(--label-tertiary);">Queued</span>
                                 {:else if group.status === 'paused'}
@@ -431,9 +438,10 @@
                                         </div>
                                     </div>
                                 {:else if group.status === 'failed'}
-                                    <div class="text-[11px] flex items-center gap-1.5" style="color: #ff453a;">
-                                        <AlertCircle size={12} />
-                                        Failed
+                                    {@const failErr = group.downloads.find(d => d.status === 'failed')?.error}
+                                    <div class="text-[11px] flex items-center gap-1.5 max-w-[200px]" style="color: #ff453a;">
+                                        <AlertCircle size={12} class="shrink-0" />
+                                        <span class="truncate">{failErr || 'Failed'}</span>
                                     </div>
                                 {/if}
 

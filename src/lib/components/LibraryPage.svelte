@@ -9,7 +9,10 @@
         removeFromLibrary,
         setGameExecutable,
         openGameFolder,
+        openLibraryFolder,
+        moveGame,
         rescanGameExecutables,
+        repairLibrary,
         initLibraryEvents,
         formatPlaytime,
         formatSize,
@@ -29,7 +32,9 @@
         AlertTriangle,
         Loader2,
         X,
+        Wrench,
     } from 'lucide-svelte';
+    import { getKnownLibraryLocations, type KnownLibraryLocation } from '$lib/stores/appSettings';
     import { getOptimizedImage } from '$lib/utils/imageProcessor';
     import type { LibraryGame } from '$lib/types';
 
@@ -38,6 +43,18 @@
     let isLaunching = false;
     let deleteTarget: LibraryGame | null = null;
     let isDeleting = false;
+    let isRepairing = false;
+    let repairResult: number | null = null;
+    let folderError: string | null = null;
+    let isMoving = false;
+    let moveResult: { success: boolean; message: string } | null = null;
+    let showMoveDropdown = false;
+    let knownLocations: KnownLibraryLocation[] = [];
+    let loadingLocations = false;
+
+    function handleWindowClick() {
+        if (showMoveDropdown) showMoveDropdown = false;
+    }
 
     onMount(() => { initLibraryEvents(); });
 
@@ -69,6 +86,83 @@
     }
 
     async function handleRescan(game: LibraryGame) { await rescanGameExecutables(game.id); }
+
+    async function handleRepair() {
+        if (isRepairing) return;
+        isRepairing = true;
+        repairResult = null;
+        try {
+            repairResult = await repairLibrary();
+        } catch (e) {
+            repairResult = 0;
+        } finally {
+            isRepairing = false;
+            setTimeout(() => { repairResult = null; }, 4000);
+        }
+    }
+
+    async function handleOpenLibraryFolder() {
+        try { await openLibraryFolder(); } catch (e) {}
+    }
+
+    function gameDrive(installPath: string): string {
+        const m = installPath.match(/^([A-Za-z]):[/\\]/);
+        return m ? m[1].toUpperCase() + ':' : '';
+    }
+
+    function gameLibraryRoot(installPath: string): string {
+        // install_path is absolute: .../Library/game-slug/game
+        // strip the last two path components to get the Library folder
+        const normalized = installPath.replace(/\\/g, '/');
+        const parts = normalized.split('/').filter(Boolean);
+        // remove trailing "game" and "game-slug"
+        return parts.slice(0, -2).join('/').toLowerCase();
+    }
+
+    async function toggleMoveDropdown(game: LibraryGame) {
+        if (showMoveDropdown) {
+            showMoveDropdown = false;
+            return;
+        }
+        loadingLocations = true;
+        showMoveDropdown = true;
+        try {
+            const locs = await getKnownLibraryLocations();
+            const gameRoot = gameLibraryRoot(game.install_path);
+            knownLocations = locs.filter(l =>
+                l.path.replace(/\\/g, '/').toLowerCase() !== gameRoot
+            );
+        } catch (e) {
+            knownLocations = [];
+        } finally {
+            loadingLocations = false;
+        }
+    }
+
+    async function handleMoveToLocation(game: LibraryGame, location: KnownLibraryLocation) {
+        showMoveDropdown = false;
+        isMoving = true;
+        moveResult = null;
+        try {
+            await moveGame(game.id, location.path);
+            moveResult = { success: true, message: `Moved to ${location.label}.` };
+        } catch (e) {
+            moveResult = { success: false, message: String(e) };
+        } finally {
+            isMoving = false;
+            setTimeout(() => { moveResult = null; }, 5000);
+        }
+    }
+
+    async function handleOpenGameFolder(game: LibraryGame) {
+        folderError = null;
+        try {
+            await openGameFolder(game.id);
+        } catch (e) {
+            folderError = String(e);
+            setTimeout(() => { folderError = null; }, 6000);
+        }
+    }
 
     function selectGame(game: LibraryGame) {
         selectedGame = selectedGame?.id === game.id ? null : game;
@@ -102,6 +196,8 @@
     $: ready = $readyGames;
 </script>
 
+<svelte:window on:click={handleWindowClick} />
+
 <div class="p-5 pb-32">
     <div class="max-w-[1600px] mx-auto">
 
@@ -129,6 +225,53 @@
                         {formatPlaytime(stats.totalPlaytime)} played
                     </div>
                 {/if}
+                <!-- Library folder + fix buttons -->
+                <div class="ml-auto flex items-center gap-2">
+                    {#if repairResult !== null}
+                        <span style="font-size: 11px; color: var(--label-tertiary);" in:fade={{ duration: 200 }}>
+                            {repairResult === 0 ? 'Nothing to recover' : `${repairResult} game${repairResult === 1 ? '' : 's'} recovered`}
+                        </span>
+                    {/if}
+                    <button
+                        on:click={handleOpenLibraryFolder}
+                        class="flex items-center gap-1.5 transition-colors"
+                        style="font-size: 11px; color: var(--label-tertiary); padding: 4px 8px; border-radius: 6px;
+                               border: 1px solid var(--border-subtle); background: transparent;"
+                        title="Open Library folder"
+                        on:mouseenter={e => (e.currentTarget as HTMLElement).style.color = 'var(--label-secondary)'}
+                        on:mouseleave={e => (e.currentTarget as HTMLElement).style.color = 'var(--label-tertiary)'}
+                    >
+                        <FolderOpen size={10} />
+                        Library
+                    </button>
+                    <button
+                        on:click={handleRepair}
+                        disabled={isRepairing}
+                        class="flex items-center gap-1.5 transition-colors disabled:opacity-40"
+                        style="font-size: 11px; color: var(--label-tertiary); padding: 4px 8px; border-radius: 6px;
+                               border: 1px solid var(--border-subtle); background: transparent;"
+                        title="Scan Library folder for missing games"
+                        on:mouseenter={e => (e.currentTarget as HTMLElement).style.color = 'var(--label-secondary)'}
+                        on:mouseleave={e => (e.currentTarget as HTMLElement).style.color = 'var(--label-tertiary)'}
+                    >
+                        {#if isRepairing}
+                            <Loader2 size={10} class="animate-spin" />
+                        {:else}
+                            <Wrench size={10} />
+                        {/if}
+                        Fix
+                    </button>
+                </div>
+            </div>
+        {/if}
+
+        <!-- Folder error banner -->
+        {#if folderError}
+            <div class="mb-4 px-3 py-2 rounded-subtle flex items-start gap-2 text-[11px]"
+                 style="background: rgba(255,59,48,0.08); border: 1px solid rgba(255,59,48,0.2); color: #ff6b6b;"
+                 in:fade={{ duration: 150 }} out:fade={{ duration: 150 }}>
+                <AlertTriangle size={13} class="flex-shrink-0 mt-0.5" />
+                {folderError}
             </div>
         {/if}
 
@@ -145,6 +288,36 @@
                 <p style="font-size: 12px; color: var(--label-tertiary); max-width: 220px; line-height: 1.6;">
                     Games you download and install will appear here.
                 </p>
+                <!-- Fix / recover button -->
+                <div class="mt-6 flex flex-col items-center gap-2">
+                    <button
+                        on:click={handleRepair}
+                        disabled={isRepairing}
+                        class="flex items-center gap-2 transition-all disabled:opacity-40"
+                        style="padding: 8px 16px; font-size: 12px; font-weight: 600; letter-spacing: -0.01em;
+                               border-radius: 8px; border: 1px solid var(--border);
+                               background: rgba(255,255,255,0.05); color: var(--label-secondary);"
+                        on:mouseenter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.09)'}
+                        on:mouseleave={e => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'}
+                    >
+                        {#if isRepairing}
+                            <Loader2 size={13} class="animate-spin" />
+                            Scanning…
+                        {:else}
+                            <Wrench size={13} />
+                            Fix Library
+                        {/if}
+                    </button>
+                    {#if repairResult !== null}
+                        <p style="font-size: 11px; color: var(--label-tertiary);" in:fade={{ duration: 200 }}>
+                            {repairResult === 0 ? 'No game folders found to recover.' : `${repairResult} game${repairResult === 1 ? '' : 's'} recovered.`}
+                        </p>
+                    {:else}
+                        <p style="font-size: 11px; color: var(--label-quaternary);">
+                            Scan the Library folder for existing game installs
+                        </p>
+                    {/if}
+                </div>
             </div>
 
         {:else}
@@ -152,6 +325,7 @@
             <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));">
                 {#each ready as game, i (game.id)}
                     {@const isSelected = selectedGame?.id === game.id}
+                    {@const drive = gameDrive(game.install_path)}
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <div
                         class="relative group cursor-pointer"
@@ -193,13 +367,6 @@
                         <!-- Bottom gradient + info -->
                         <div class="absolute inset-x-0 bottom-0 z-10 px-2.5 pb-2.5 pt-10"
                              style="background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.55) 50%, transparent 100%);">
-                            {#if game.status === 'corrupted'}
-                                <span class="block mb-1 w-fit"
-                                      style="font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
-                                             background: rgba(255,69,58,0.2); color: #ff453a; border: 1px solid rgba(255,69,58,0.3);">
-                                    Error
-                                </span>
-                            {/if}
                             <h3 style="font-size: 11px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3;
                                        color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,0.8);"
                                 class="line-clamp-2">
@@ -212,6 +379,13 @@
                                     <span style="color: var(--label-quaternary);">·</span>
                                     <Clock size={10} />
                                     <span>{formatPlaytime(game.total_playtime)}</span>
+                                {/if}
+                                {#if drive}
+                                    <span style="margin-left: auto; font-size: 9px; font-weight: 700;
+                                                 letter-spacing: 0.04em; padding: 1px 4px; border-radius: 3px;
+                                                 background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.5);">
+                                        {drive}
+                                    </span>
                                 {/if}
                             </div>
                         </div>
@@ -236,7 +410,7 @@
                                 {/if}
                             </button>
                             <button
-                                on:click|stopPropagation={() => openGameFolder(game.id)}
+                                on:click|stopPropagation={() => handleOpenGameFolder(game)}
                                 class="flex items-center justify-center transition-colors"
                                 style="width: 28px; height: 28px; border-radius: 8px;
                                        background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.14);
@@ -268,10 +442,25 @@
             border: 1px solid var(--border);
             border-radius: 14px;
             box-shadow: var(--shadow-panel);
-            overflow: hidden;
         ">
             <!-- Top accent -->
-            <div style="height: 2px; background: rgba(255,255,255,0.1);"></div>
+            <div style="height: 2px; background: rgba(255,255,255,0.1); border-radius: 14px 14px 0 0;"></div>
+
+            {#if moveResult}
+                <div class="flex items-center gap-2 px-5 py-2.5"
+                     style="font-size: 11px; border-bottom: 1px solid var(--border-subtle);
+                            background: {moveResult.success ? 'rgba(50,215,75,0.06)' : 'rgba(255,69,58,0.06)'};
+                            color: {moveResult.success ? '#32d74b' : '#ff453a'};
+                            border-radius: 14px 14px 0 0;"
+                     in:fly={{ y: -4, duration: 180 }}>
+                    {#if moveResult.success}
+                        <Check size={12} />
+                    {:else}
+                        <AlertTriangle size={12} />
+                    {/if}
+                    {moveResult.message}
+                </div>
+            {/if}
 
             <div class="flex items-center gap-4 px-5 py-4">
                 <!-- Cover thumbnail -->
@@ -312,6 +501,18 @@
                             <span>{new Date(game.last_played).toLocaleDateString()}</span>
                         {/if}
                     </div>
+
+                    <!-- Install path -->
+                    {#if game.install_path}
+                        <div class="flex items-center gap-1 mt-1 num"
+                             style="font-size: 10px; color: var(--label-quaternary); min-width: 0;"
+                             title={game.install_path}>
+                            <FolderOpen size={9} style="flex-shrink: 0;" />
+                            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                {game.install_path}
+                            </span>
+                        </div>
+                    {/if}
 
                     <!-- Exe selector -->
                     {#if showExeSelector && game.executables.length > 0}
@@ -398,13 +599,113 @@
 
                     <!-- Open folder -->
                     <button
-                        on:click={() => openGameFolder(game.id)}
+                        on:click={() => handleOpenGameFolder(game)}
                         class="btn-icon"
                         style="width: 34px; height: 34px; border-radius: 8px;"
                         title="Open folder"
                     >
                         <FolderOpen size={14} />
                     </button>
+
+                    <!-- Move to -->
+                    <div style="position: relative;">
+                        <button
+                            on:click|stopPropagation={() => toggleMoveDropdown(game)}
+                            disabled={isMoving}
+                            class="btn-icon"
+                            style="width: 34px; height: 34px; border-radius: 8px;
+                                   {showMoveDropdown ? 'background: rgba(255,255,255,0.1); color: var(--label-primary);' : ''}"
+                            title="Move to another library location"
+                        >
+                            {#if isMoving}
+                                <Loader2 size={14} class="animate-spin" />
+                            {:else}
+                                <!-- two-files-transfer icon -->
+                                <svg width="20" height="17" viewBox="0 0 22 16" fill="none"
+                                     stroke="currentColor" stroke-width="1.4"
+                                     stroke-linecap="round" stroke-linejoin="round">
+                                    <!-- left file -->
+                                    <path d="M1 1h4L7 3V13H1V1z"/>
+                                    <path d="M5 1v2h2"/>
+                                    <!-- arrow -->
+                                    <path d="M9 7h4"/>
+                                    <path d="M11.5 5l1.5 2-1.5 2"/>
+                                    <!-- right file -->
+                                    <path d="M15 1h4l2 2V13H15V1z"/>
+                                    <path d="M19 1v2h2"/>
+                                </svg>
+                            {/if}
+                        </button>
+
+                        {#if showMoveDropdown}
+                            <!-- svelte-ignore a11y_no_static_element_interactions -->
+                            <div
+                                on:click|stopPropagation
+                                style="position: absolute; bottom: calc(100% + 8px); right: 0;
+                                       min-width: 220px; z-index: 200;
+                                       background: var(--bg-surface);
+                                       border: 1px solid var(--border);
+                                       border-radius: 10px;
+                                       box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+                                       overflow: hidden;"
+                                in:fly={{ y: 6, duration: 150 }}
+                            >
+                                <div style="padding: 8px 12px 6px; border-bottom: 1px solid var(--border-subtle);">
+                                    <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+                                                 text-transform: uppercase; color: var(--label-tertiary);">
+                                        Move to Library
+                                    </span>
+                                </div>
+
+                                {#if loadingLocations}
+                                    <div class="flex items-center justify-center" style="padding: 14px;">
+                                        <Loader2 size={14} class="animate-spin" style="color: var(--label-tertiary);" />
+                                    </div>
+                                {:else if knownLocations.length === 0}
+                                    <div style="padding: 12px; font-size: 11px; color: var(--label-tertiary); text-align: center; line-height: 1.5;">
+                                        No other library locations.<br>
+                                        Add one in <strong style="color: var(--label-secondary);">Settings → Storage</strong>.
+                                    </div>
+                                {:else}
+                                    {#each knownLocations as loc}
+                                        <button
+                                            on:click={() => handleMoveToLocation(game, loc)}
+                                            class="w-full text-left"
+                                            style="display: flex; flex-direction: column; gap: 2px;
+                                                   padding: 9px 12px; border: none; background: transparent;
+                                                   cursor: pointer; transition: background 0.12s;"
+                                            on:mouseenter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'}
+                                            on:mouseleave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+                                        >
+                                            <span style="font-size: 12px; font-weight: 500; color: var(--label-primary);">
+                                                {loc.label}
+                                            </span>
+                                            <span class="num" style="font-size: 10px; color: var(--label-tertiary);
+                                                         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 196px;">
+                                                {loc.path}
+                                            </span>
+                                        </button>
+                                    {/each}
+                                {/if}
+
+                                {#if !loadingLocations}
+                                    <div style="border-top: 1px solid var(--border-subtle); padding: 5px 8px;">
+                                        <button
+                                            on:click={() => showMoveDropdown = false}
+                                            class="w-full"
+                                            style="font-size: 11px; color: var(--label-tertiary); background: transparent;
+                                                   border: none; cursor: pointer; padding: 4px; border-radius: 5px;
+                                                   transition: color 0.12s;"
+                                            on:mouseenter={e => (e.currentTarget as HTMLElement).style.color = 'var(--label-secondary)'}
+                                            on:mouseleave={e => (e.currentTarget as HTMLElement).style.color = 'var(--label-tertiary)'}
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                {/if}
+                            </div>
+                        {/if}
+                    </div>
 
                     <!-- Delete -->
                     <button
