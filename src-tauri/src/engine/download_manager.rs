@@ -628,13 +628,23 @@ pub async fn streaming_download(
     cookies: Option<String>,
 ) -> Result<StreamingDownloadResult, StreamingDownloadError> {
     use std::io::Write;
-    use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
+    use reqwest::header::{HeaderMap, HeaderValue, COOKIE, REFERER};
 
     log::info!("[StreamingDownload] Starting download: {} -> {:?}", url, download_dir);
+
+    // Derive the Referer from the download URL's origin (satisfies hotlink protection)
+    let referer = url::Url::parse(url)
+        .ok()
+        .map(|u| format!("{}://{}/", u.scheme(), u.host_str().unwrap_or("")));
 
     // Create client with proper headers
     let mut headers = HeaderMap::new();
     headers.insert("User-Agent", HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"));
+    if let Some(ref r) = referer {
+        if let Ok(v) = HeaderValue::from_str(r) {
+            headers.insert(REFERER, v);
+        }
+    }
     if let Some(ref c) = cookies {
         if let Ok(v) = HeaderValue::from_str(c) {
             headers.insert(COOKIE, v);
@@ -653,6 +663,21 @@ pub async fn streaming_download(
 
     if !response.status().is_success() {
         return Err(StreamingDownloadError::Error(format!("HTTP error: {}", response.status())));
+    }
+
+    // Guard: if the server returns an HTML page instead of a file, fail early with a
+    // clear error rather than silently saving a corrupt download.
+    let content_type = response.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    if content_type.contains("text/html") {
+        return Err(StreamingDownloadError::Error(
+            "The server returned an HTML page instead of a file. \
+             This usually means the download link has expired, \
+             the session is not authenticated, or hotlink protection blocked the request.".to_string()
+        ));
     }
 
     // Get total size
