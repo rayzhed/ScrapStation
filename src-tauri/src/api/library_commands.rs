@@ -362,7 +362,29 @@ pub async fn launch_game(
             .map_err(|e| format!("Failed to launch game: {}", e))?;
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        use crate::settings::UserSettings;
+
+        let wine = UserSettings::resolve_wine_binary()?;
+
+        // Each game gets its own Wine prefix for isolation
+        let prefix_base = UserSettings::resolve_wine_prefix_dir();
+        let prefix = prefix_base.join(&id);
+        std::fs::create_dir_all(&prefix)
+            .map_err(|e| format!("Failed to create Wine prefix directory: {}", e))?;
+
+        log::info!("[Library] Launching via Wine: {:?} prefix={:?}", wine, prefix);
+
+        std::process::Command::new(&wine)
+            .arg(&full_exe_path)
+            .current_dir(working_dir)
+            .env("WINEPREFIX", &prefix)
+            .spawn()
+            .map_err(|e| format!("Failed to launch game via Wine: {}", e))?;
+    }
+
+    #[cfg(target_os = "macos")]
     {
         std::process::Command::new(&full_exe_path)
             .current_dir(working_dir)

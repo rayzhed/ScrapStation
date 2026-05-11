@@ -3,9 +3,9 @@
     import { listen, type UnlistenFn } from '@tauri-apps/api/event';
     import { open as openDialog } from '@tauri-apps/plugin-dialog';
     import { sources } from '$lib/stores/sources';
-    import { storageConfig, loadStorageConfig, setDataRoot, getKnownLibraryLocations, addLibraryLocation, removeLibraryLocation, type KnownLibraryLocation } from '$lib/stores/appSettings';
+    import { storageConfig, loadStorageConfig, setDataRoot, getKnownLibraryLocations, addLibraryLocation, removeLibraryLocation, getWineStatus, setLinuxConfig, type KnownLibraryLocation, type WineStatus, type LinuxConfig } from '$lib/stores/appSettings';
     import { downloadStats } from '$lib/stores/downloads';
-    import { Settings, ChevronDown, ChevronRight, Save, RotateCcw, AlertCircle, Check, FolderOpen, ExternalLink, HardDrive, Wrench, CheckCircle, XCircle, Plus, Trash2 } from 'lucide-svelte';
+    import { Settings, ChevronDown, ChevronRight, Save, RotateCcw, AlertCircle, Check, FolderOpen, ExternalLink, HardDrive, Wrench, CheckCircle, XCircle, Plus, Trash2, Terminal } from 'lucide-svelte';
     import * as LucideIcons from 'lucide-svelte';
     import { onMount, onDestroy } from 'svelte';
     import SettingSectionRenderer from './SettingSectionRenderer.svelte';
@@ -69,6 +69,38 @@
     let storageSaving = false;
     let storageRootChanged = false;
     let showRootPicker = false;
+
+    // Linux / Wine configuration
+    let wineStatus: WineStatus | null = null;
+    let wineSaving = false;
+    let wineCustomBinary = '';
+    let wineCustomPrefixDir = '';
+
+    async function loadWineStatus() {
+        try {
+            wineStatus = await getWineStatus();
+            wineCustomBinary = wineStatus.config.wine_binary ?? '';
+            wineCustomPrefixDir = wineStatus.config.wine_prefix_dir ?? '';
+        } catch (e) {
+            console.error('[Settings] Failed to load Wine status:', e);
+        }
+    }
+
+    async function saveWineConfig() {
+        wineSaving = true;
+        try {
+            const config: LinuxConfig = {
+                wine_binary: wineCustomBinary.trim() || null,
+                wine_prefix_dir: wineCustomPrefixDir.trim() || null,
+            };
+            await setLinuxConfig(config);
+            await loadWineStatus();
+        } catch (e) {
+            console.error('[Settings] Failed to save Wine config:', e);
+        } finally {
+            wineSaving = false;
+        }
+    }
 
     /** Derive a data-root suggestion from a known library path by stripping the ScrapStation\Library suffix. */
     function libraryPathToRoot(libraryPath: string): string {
@@ -227,6 +259,7 @@
         await loadStorageConfig();
         await loadLibraryLocations();
         await loadAllSettings();
+        await loadWineStatus();
 
         // Track active section via scroll position
         const observer = new IntersectionObserver(
@@ -239,7 +272,7 @@
         );
         // Observe after a tick so IDs are rendered
         setTimeout(() => {
-            ['section-storage', 'section-sources', 'section-source-settings', 'section-recovery'].forEach(id => {
+            ['section-storage', 'section-linux', 'section-sources', 'section-source-settings', 'section-recovery'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) observer.observe(el);
             });
@@ -499,6 +532,15 @@
                     on:click={() => scrollToSection('section-recovery')}>
                 <Wrench size={14} /> Recovery
             </button>
+            {#if wineStatus !== null}
+            <button class="nav-item" class:nav-active={activeSection === 'section-linux'}
+                    on:click={() => scrollToSection('section-linux')}>
+                <Terminal size={14} /> Linux
+                {#if !wineStatus.available}
+                    <span style="width:6px;height:6px;border-radius:50%;background:var(--color-warning, #f59e0b);flex-shrink:0;"></span>
+                {/if}
+            </button>
+            {/if}
 
             {#if sourceSettings.length > 0}
                 <p class="nav-label" style="margin-top: 16px;">Source Settings</p>
@@ -757,6 +799,76 @@
             </div>
         </div>
     </section>
+
+    <!-- ══ Linux / Wine ═════════════════════════════════════════════════════ -->
+    {#if wineStatus !== null}
+        <div class="section-divider"></div>
+        <section id="section-linux">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Linux</h2>
+                    <p class="section-desc">Wine configuration for running Windows games.</p>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <!-- Wine status indicator -->
+                <div class="setting-row">
+                    <div class="setting-label">
+                        <span class="label-text">Wine</span>
+                        <span class="label-sub">Detected installation</span>
+                    </div>
+                    <div class="setting-control" style="display:flex;align-items:center;gap:8px;">
+                        {#if wineStatus.available}
+                            <CheckCircle size={14} style="color:var(--color-success,#22c55e);flex-shrink:0;" />
+                            <span class="path-text" title={wineStatus.wine_path ?? ''}>{wineStatus.wine_path}</span>
+                        {:else}
+                            <XCircle size={14} style="color:var(--color-error,#ef4444);flex-shrink:0;" />
+                            <span style="color:var(--label-secondary);font-size:12px;">Not found — install Wine to launch games</span>
+                        {/if}
+                    </div>
+                </div>
+
+                <!-- Custom Wine binary -->
+                <div class="setting-row">
+                    <div class="setting-label">
+                        <span class="label-text">Wine binary</span>
+                        <span class="label-sub">Leave empty to auto-detect</span>
+                    </div>
+                    <div class="setting-control">
+                        <input
+                            class="path-input"
+                            type="text"
+                            placeholder="/usr/bin/wine"
+                            bind:value={wineCustomBinary}
+                        />
+                    </div>
+                </div>
+
+                <!-- Custom prefix directory -->
+                <div class="setting-row">
+                    <div class="setting-label">
+                        <span class="label-text">Prefix directory</span>
+                        <span class="label-sub">Per-game Wine prefixes are created here</span>
+                    </div>
+                    <div class="setting-control">
+                        <input
+                            class="path-input"
+                            type="text"
+                            placeholder={wineStatus.prefix_dir}
+                            bind:value={wineCustomPrefixDir}
+                        />
+                    </div>
+                </div>
+
+                <div style="display:flex;justify-content:flex-end;padding-top:4px;">
+                    <button class="btn-primary" on:click={saveWineConfig} disabled={wineSaving}>
+                        {#if wineSaving}Saving…{:else}<Save size={13} /> Save{/if}
+                    </button>
+                </div>
+            </div>
+        </section>
+    {/if}
 
     <!-- ══ Source settings ══════════════════════════════════════════════════ -->
     {#if loading || sourceSettings.length > 0}

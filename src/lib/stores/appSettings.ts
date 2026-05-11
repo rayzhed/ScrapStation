@@ -43,3 +43,23 @@ export async function addLibraryLocation(path: string): Promise<void> {
 export async function removeLibraryLocation(path: string): Promise<void> {
     await invoke('remove_library_location', { path });
 }
+
+export interface LinuxConfig {
+    wine_binary: string | null;
+    wine_prefix_dir: string | null;
+}
+
+export interface WineStatus {
+    wine_path: string | null;
+    available: boolean;
+    prefix_dir: string;
+    config: LinuxConfig;
+}
+
+export async function getWineStatus(): Promise<WineStatus> {
+    return invoke<WineStatus>('get_wine_status');
+}
+
+export async function setLinuxConfig(config: LinuxConfig): Promise<void> {
+    await invoke('set_linux_config', { config });
+}

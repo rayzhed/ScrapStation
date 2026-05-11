@@ -6,6 +6,18 @@ use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use tauri::Manager;
 
+/// Linux-specific configuration (Wine/Proton)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LinuxConfig {
+    /// Path to the Wine binary. When None, the app auto-detects from PATH.
+    #[serde(default)]
+    pub wine_binary: Option<String>,
+    /// Base directory for per-game Wine prefixes.
+    /// Defaults to ~/.local/share/ScrapStation/prefixes
+    #[serde(default)]
+    pub wine_prefix_dir: Option<String>,
+}
+
 /// App-level storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -18,6 +30,9 @@ pub struct AppConfig {
     /// Each entry is an absolute path to a Library folder.
     #[serde(default)]
     pub extra_library_paths: Vec<String>,
+    /// Linux-specific Wine/Proton configuration (ignored on other platforms).
+    #[serde(default)]
+    pub linux_config: LinuxConfig,
 }
 
 /// User settings stored per source
@@ -186,6 +201,76 @@ impl UserSettings {
         settings.app_config.extra_library_paths.retain(|p| p != path);
         settings.save()?;
         Ok(())
+    }
+
+    // ===== Linux / Wine config =====
+
+    /// Get the current Linux config
+    pub fn get_linux_config() -> LinuxConfig {
+        SETTINGS.lock().ok().map(|s| s.app_config.linux_config.clone()).unwrap_or_default()
+    }
+
+    /// Update the Linux config
+    pub fn set_linux_config(config: LinuxConfig) -> Result<(), String> {
+        let mut settings = SETTINGS.lock()
+            .map_err(|e| format!("Failed to lock settings: {}", e))?;
+        settings.app_config.linux_config = config;
+        settings.save()?;
+        Ok(())
+    }
+
+    /// Resolve the Wine binary to use: user override → auto-detect from PATH → error.
+    pub fn resolve_wine_binary() -> Result<PathBuf, String> {
+        let config = Self::get_linux_config();
+
+        // User-specified path takes priority
+        if let Some(path) = config.wine_binary {
+            let p = PathBuf::from(&path);
+            if p.is_file() {
+                return Ok(p);
+            }
+            return Err(format!("Configured Wine binary not found: {}", path));
+        }
+
+        // Auto-detect: try common locations then fall back to PATH lookup
+        let candidates = [
+            "/usr/bin/wine",
+            "/usr/local/bin/wine",
+            "/opt/wine/bin/wine",
+            "/opt/wine-stable/bin/wine",
+            "/opt/wine-staging/bin/wine",
+        ];
+        for candidate in &candidates {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+
+        // Last resort: `which wine`
+        if let Ok(output) = std::process::Command::new("which").arg("wine").output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+
+        Err("Wine not found. Please install Wine or set the path in Settings → Linux.".to_string())
+    }
+
+    /// Resolve the base directory for per-game Wine prefixes.
+    /// Defaults to ~/.local/share/ScrapStation/prefixes
+    pub fn resolve_wine_prefix_dir() -> PathBuf {
+        let config = Self::get_linux_config();
+        if let Some(dir) = config.wine_prefix_dir {
+            return PathBuf::from(dir);
+        }
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+            .join("ScrapStation")
+            .join("prefixes")
     }
 
     /// Set a new data root (None = revert to AppData default)

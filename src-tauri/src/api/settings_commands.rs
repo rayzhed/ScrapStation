@@ -1,7 +1,7 @@
 use crate::engine::SourceLoader;
 use crate::engine::download_tracker::get_download_folder;
 use crate::engine::library_tracker::get_library_folder;
-use crate::settings::UserSettings;
+use crate::settings::{UserSettings, LinuxConfig};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -426,4 +426,48 @@ fn patch_and_count(dir: &std::path::Path, old: &str, new: &str) -> usize {
         }
     }
     count
+}
+
+// ===== Linux / Wine configuration =====
+
+#[derive(Serialize)]
+pub struct WineStatus {
+    /// Resolved Wine binary path (auto-detected or user-set), or null if not found.
+    pub wine_path: Option<String>,
+    /// Whether Wine was found.
+    pub available: bool,
+    /// Resolved base directory for per-game Wine prefixes.
+    pub prefix_dir: String,
+    /// Current Linux config (for display in settings).
+    pub config: LinuxConfig,
+}
+
+/// Return current Wine/Linux configuration and detection status.
+#[tauri::command]
+pub async fn get_wine_status() -> WineStatus {
+    let config = UserSettings::get_linux_config();
+    let prefix_dir = UserSettings::resolve_wine_prefix_dir()
+        .to_string_lossy()
+        .to_string();
+
+    match UserSettings::resolve_wine_binary() {
+        Ok(path) => WineStatus {
+            wine_path: Some(path.to_string_lossy().to_string()),
+            available: true,
+            prefix_dir,
+            config,
+        },
+        Err(_) => WineStatus {
+            wine_path: None,
+            available: false,
+            prefix_dir,
+            config,
+        },
+    }
+}
+
+/// Save Linux / Wine configuration.
+#[tauri::command]
+pub async fn set_linux_config(config: LinuxConfig) -> Result<(), String> {
+    UserSettings::set_linux_config(config)
 }

@@ -308,6 +308,9 @@ pub fn run() {
             // Recovery commands
             api::run_appdata_migration,
             api::fix_broken_paths,
+            // Linux / Wine configuration
+            api::get_wine_status,
+            api::set_linux_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
