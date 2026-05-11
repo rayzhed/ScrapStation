@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - dev
-      - feature/linux-support
     paths-ignore:
       - '**.md'
       - 'LICENSE'
