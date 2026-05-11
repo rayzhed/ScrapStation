@@ -998,7 +998,7 @@ pub async fn open_download_folder(
 pub async fn open_file_location(
     file_path: String,
 ) -> Result<(), String> {
-    let _path = std::path::Path::new(&file_path);
+    let path = std::path::Path::new(&file_path);
 
     #[cfg(target_os = "windows")]
     {
