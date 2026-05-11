@@ -109,9 +109,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # For dev pushes, wait for Windows to create the release first
-    needs: ${{ github.event_name != 'pull_request' && 'build-windows' || '' }}
-    if: always() && (needs.build-windows.result == 'success' || github.event_name == 'pull_request')
+    # Always depend on Windows so dev pushes wait for the release to be created first
+    needs: build-windows
+    if: always() && needs.build-windows.result == 'success'
 
     steps:
       - name: Checkout
