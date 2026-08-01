@@ -367,6 +367,32 @@ async fn run_smart_download_background(
         }
     }
 
+    // Api host: apply host-level resolver steps to transform to a direct download URL
+    if let Some(hc) = host_config.as_ref().filter(|h| h.download_method == DownloadMethod::Api) {
+        if hc.resolver.is_some() {
+            log::info!("[SmartDownloadBg] Api host — applying host resolver");
+            let probe_client = reqwest::Client::builder()
+                .user_agent(crate::constants::USER_AGENT)
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .build()
+                .unwrap_or_default();
+            let http_client = HttpClient::new(probe_client);
+            let manager = DownloadManager::new(http_client);
+            let direct_url = manager.resolve_for_probe(&resolved_url, config.hosts.as_ref()).await;
+            log::info!("[SmartDownloadBg] Api host resolved URL: {}", direct_url);
+            return perform_streaming_download_bg(
+                app_handle,
+                direct_url,
+                filename_hint,
+                download_id,
+                tracker,
+                cookies,
+                download_dir,
+                install_dir,
+            ).await;
+        }
+    }
+
     // Standard streaming download
     perform_streaming_download_bg(
         app_handle,

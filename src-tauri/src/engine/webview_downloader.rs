@@ -487,7 +487,7 @@ impl WebViewDownloader {
         log::info!("[WebViewDownloader] WebView created, waiting for page load...");
 
         // Initial wait for the starting page to load
-        tokio::time::sleep(Duration::from_millis(3000)).await;
+        tokio::time::sleep(Duration::from_millis(config.navigate_from_wait_ms)).await;
 
         // If we started at a navigate_from URL, now navigate to the real download
         // URL. The browser will set Referer to the navigate_from page automatically.
@@ -498,7 +498,7 @@ impl WebViewDownloader {
                 url.replace('\\', "\\\\").replace('\'', "\\'")
             );
             let _ = webview.eval(&nav_script);
-            tokio::time::sleep(Duration::from_millis(3000)).await;
+            tokio::time::sleep(Duration::from_millis(config.navigate_from_wait_ms)).await;
         }
 
         // Inject the capture script with the event name
@@ -522,50 +522,54 @@ impl WebViewDownloader {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Execute extraction based on config
-        if let Some(extract_script) = &config.extract_url_script {
-            log::info!("[WebViewDownloader] Using custom extraction script");
-            let full_script = format!(
-                r#"
-                (async function() {{
-                    try {{
-                        const url = await (async function() {{ {} }})();
-                        if (url) {{
-                            window.__TAURI__.event.emit('{}', {{ url: url }});
+        // Execute extraction based on config.
+        // When intercept_download is true, the on_download handler captures the URL
+        // automatically — no click or script extraction needed.
+        if !config.intercept_download {
+            if let Some(extract_script) = &config.extract_url_script {
+                log::info!("[WebViewDownloader] Using custom extraction script");
+                let full_script = format!(
+                    r#"
+                    (async function() {{
+                        try {{
+                            const url = await (async function() {{ {} }})();
+                            if (url) {{
+                                window.__TAURI__.event.emit('{}', {{ url: url }});
+                            }}
+                        }} catch(e) {{
+                            console.error('Extraction failed:', e);
                         }}
-                    }} catch(e) {{
-                        console.error('Extraction failed:', e);
-                    }}
-                }})();
-                "#,
-                extract_script, event_name
-            );
-            if let Err(e) = webview.eval(&full_script) {
-                log::error!("[WebViewDownloader] Extraction script failed: {}", e);
-            }
-        } else if let Some(click_selector) = &config.click {
-            log::info!("[WebViewDownloader] Clicking selector: {}", click_selector);
-            let click_script = format!(
-                r#"
-                (function() {{
-                    const el = document.querySelector('{}');
-                    if (el) {{
-                        // If it has an href, capture it before clicking
-                        if (el.href && !el.href.startsWith('javascript:')) {{
-                            window.__TAURI__.event.emit('{}', {{ url: el.href }});
+                    }})();
+                    "#,
+                    extract_script, event_name
+                );
+                if let Err(e) = webview.eval(&full_script) {
+                    log::error!("[WebViewDownloader] Extraction script failed: {}", e);
+                }
+            } else if let Some(click_selector) = &config.click {
+                log::info!("[WebViewDownloader] Clicking selector: {}", click_selector);
+                let click_script = format!(
+                    r#"
+                    (function() {{
+                        const el = document.querySelector('{}');
+                        if (el) {{
+                            // If it has an href, capture it before clicking
+                            if (el.href && !el.href.startsWith('javascript:')) {{
+                                window.__TAURI__.event.emit('{}', {{ url: el.href }});
+                            }}
+                            el.click();
+                        }} else {{
+                            console.error('Element not found:', '{}');
                         }}
-                        el.click();
-                    }} else {{
-                        console.error('Element not found:', '{}');
-                    }}
-                }})();
-                "#,
-                click_selector.replace('\'', "\\'"),
-                event_name,
-                click_selector.replace('\'', "\\'")
-            );
-            if let Err(e) = webview.eval(&click_script) {
-                log::error!("[WebViewDownloader] Click script failed: {}", e);
+                    }})();
+                    "#,
+                    click_selector.replace('\'', "\\'"),
+                    event_name,
+                    click_selector.replace('\'', "\\'")
+                );
+                if let Err(e) = webview.eval(&click_script) {
+                    log::error!("[WebViewDownloader] Click script failed: {}", e);
+                }
             }
         }
 
@@ -609,18 +613,12 @@ impl WebViewDownloader {
                     let retry_click_script = format!(
                         r#"
                         (function() {{
-                            // Try multiple download button selectors
-                            const selectors = ['{}', 'a[href*="download"]', 'button[class*="download"]', '#downloadButton', '.download-btn', 'a.btn-download'];
-                            for (const sel of selectors) {{
-                                const el = document.querySelector(sel);
-                                if (el && el.offsetParent !== null) {{ // Check if visible
-                                    console.log('[CrackStation] Clicking:', sel);
-                                    if (el.href && !el.href.startsWith('javascript:')) {{
-                                        window.__TAURI__.event.emit('{}', {{ url: el.href }});
-                                    }}
-                                    el.click();
-                                    break;
+                            const el = document.querySelector('{}');
+                            if (el && el.offsetParent !== null) {{
+                                if (el.href && !el.href.startsWith('javascript:')) {{
+                                    window.__TAURI__.event.emit('{}', {{ url: el.href }});
                                 }}
+                                el.click();
                             }}
                         }})();
                         "#,

@@ -96,10 +96,19 @@ pub struct WebViewDownloadConfig {
     /// which is required by hosts that block direct navigation (hotlink protection).
     #[serde(default)]
     pub navigate_from: Option<String>,
+
+    /// How long to wait (ms) after the navigate_from page loads before JS-navigating
+    /// to the real download URL. Increase for slow-loading intermediate pages.
+    #[serde(default = "default_navigate_wait")]
+    pub navigate_from_wait_ms: u64,
 }
 
 fn default_wait_timeout() -> u64 {
     30000 // 30 seconds default
+}
+
+fn default_navigate_wait() -> u64 {
+    3000
 }
 
 /// Display configuration for a host
