@@ -261,6 +261,7 @@ pub fn run() {
             api::get_source_cookies,
             api::clear_source_cookies,
             api::fetch_image,
+            api::fetch_cf_image,
             api::read_local_image,
             api::estimate_total_pages,
             // Download tracker commands
@@ -299,6 +300,7 @@ pub fn run() {
             api::probe_download_size,
             api::download_and_run_installer,
             api::repair_library,
+            api::dedup_library,
             // Storage configuration
             api::get_storage_config,
             api::set_data_root,

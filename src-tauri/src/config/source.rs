@@ -90,6 +90,11 @@ pub struct AuthConfig {
     /// (needed for sites with Cloudflare or JavaScript-based protection)
     #[serde(default)]
     pub requires_webview_fetch: bool,
+
+    /// If true, automatically open a hidden WebView on first 403 to get a
+    /// Cloudflare clearance cookie, then retry via the browser's fetch().
+    #[serde(default)]
+    pub cloudflare_protected: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

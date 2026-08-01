@@ -21,66 +21,149 @@
     function selectGame(index: number) {
         dispatch('select', index);
     }
+
+    const SKELETON_COUNT = 20;
+    const skeletons = Array.from({ length: SKELETON_COUNT }, (_, i) => i);
 </script>
 
-<div class="mx-auto px-6 py-5 pb-10" style="max-width: 1920px;">
-    {#if loading}
-        <EmptyState type="loading" />
-    {:else if error}
-        <EmptyState
-            type="error"
-            {error}
-            {sourceName}
-            {onRetry}
-        />
-    {:else if games.length === 0}
+<div class="browser-root">
+    {#if error}
+        <EmptyState type="error" {error} {sourceName} {onRetry} />
+
+    {:else if !loading && games.length === 0}
         <EmptyState type="empty" {sourceName} sourceColor={sourceColor} />
+
     {:else}
-        <div class="grid gap-3.5" style="grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));">
-            {#each games as game, index (game.title + game.author + game.game_url)}
-                {@const status = statusForGame($gameStatusMap, $loadingSource, game.game_url)}
-                <div
-                    role="button"
-                    tabindex="0"
-                    on:click={() => selectGame(index)}
-                    on:keydown={(e) => e.key === 'Enter' && selectGame(index)}
-                >
-                    <GameCard {game} {status} {index} {sourceColor} />
-                </div>
-            {/each}
+        <div class="game-grid">
+            {#if loading}
+                {#each skeletons as i}
+                    <div class="skeleton-card" style="animation-delay: {Math.min(i * 0.028, 0.36)}s;">
+                        <div class="shimmer absolute inset-0 rounded-[12px]"></div>
+                        <div class="skeleton-footer">
+                            <div class="shimmer skeleton-line" style="width: 68%;"></div>
+                            <div class="shimmer skeleton-line" style="width: 42%; margin-top: 6px; height: 7px;"></div>
+                        </div>
+                    </div>
+                {/each}
+
+            {:else}
+                {#each games as game, index (game.title + game.author + game.game_url)}
+                    {@const status = statusForGame($gameStatusMap, $loadingSource, game.game_url)}
+                    <div
+                        role="button"
+                        tabindex="0"
+                        on:click={() => selectGame(index)}
+                        on:keydown={(e) => e.key === 'Enter' && selectGame(index)}
+                    >
+                        <GameCard {game} {status} {index} {sourceColor} sourceId={$currentSourceStore} />
+                    </div>
+                {/each}
+            {/if}
         </div>
 
-        <!-- Pagination -->
-        {#if !$isSearchResult}
-            <div class="flex items-center justify-center gap-4 mt-10">
+        {#if !loading && !$isSearchResult}
+            <div class="pagination">
                 <button
                     on:click={() => goToPrevPage($currentSourceStore)}
                     disabled={!$hasPrevPage}
-                    class="btn-secondary disabled:opacity-25 disabled:cursor-not-allowed"
+                    class="btn-secondary page-btn disabled:opacity-25 disabled:cursor-not-allowed"
                 >
-                    <ChevronLeft size={14} />
+                    <ChevronLeft size={13} />
                     <span>Previous</span>
                 </button>
 
-                <div class="flex flex-col items-center gap-0.5">
-                    <span class="text-[12px] font-semibold" style="color: var(--label-secondary);">
-                        Page {$currentPage}
-                    </span>
-                    <span class="text-[11px]" style="color: var(--label-quaternary);">
-                        {games.length} game{games.length === 1 ? '' : 's'}
-                    </span>
+                <div class="page-label">
+                    <span class="page-number">Page {$currentPage}</span>
+                    <span class="page-count">{games.length} games</span>
                 </div>
 
                 <button
                     on:click={() => goToNextPage($currentSourceStore)}
                     disabled={!$hasNextPage}
-                    class="btn-secondary disabled:opacity-25 disabled:cursor-not-allowed"
+                    class="btn-secondary page-btn disabled:opacity-25 disabled:cursor-not-allowed"
                 >
                     <span>Next</span>
-                    <ChevronRight size={14} />
+                    <ChevronRight size={13} />
                 </button>
             </div>
         {/if}
     {/if}
 </div>
-mak
+
+<style>
+    .browser-root {
+        max-width: 1920px;
+        margin: 0 auto;
+        padding: 20px 24px 56px;
+    }
+
+    /* ── Grid ───────────────────────────────────────────────────────────────── */
+    .game-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 14px;
+    }
+
+    /* ── Skeleton cards ─────────────────────────────────────────────────────── */
+    .skeleton-card {
+        position: relative;
+        overflow: hidden;
+        aspect-ratio: 3 / 4;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        background: #1a1a1c;
+        opacity: 0;
+        animation: sk-appear 0.25s ease forwards;
+    }
+
+    @keyframes sk-appear {
+        to { opacity: 1; }
+    }
+
+    .skeleton-footer {
+        position: absolute;
+        inset-inline: 0;
+        bottom: 0;
+        padding: 40px 12px 14px;
+        background: linear-gradient(to top, rgba(0, 0, 0, 0.82) 0%, transparent 100%);
+    }
+
+    .skeleton-line {
+        height: 9px;
+        border-radius: 5px;
+        display: block;
+    }
+
+    /* ── Pagination ─────────────────────────────────────────────────────────── */
+    .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        margin-top: 40px;
+    }
+
+    .page-btn {
+        min-width: 96px;
+        justify-content: center;
+    }
+
+    .page-label {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        min-width: 80px;
+    }
+
+    .page-number {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--label-secondary);
+    }
+
+    .page-count {
+        font-size: 10px;
+        color: var(--label-quaternary);
+    }
+</style>

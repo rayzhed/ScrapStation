@@ -254,11 +254,12 @@ export async function moveGame(gameId: string, targetDir: string): Promise<strin
 }
 
 // Repair library: scan Library folder for game directories not in the database
-// Returns the number of games recovered
+// Returns the number of games recovered/updated
 export async function repairLibrary(): Promise<number> {
-    const count = await invoke<number>('repair_library');
+    const deduped = await invoke<number>('dedup_library');
+    const recovered = await invoke<number>('repair_library');
     await loadLibrary();
-    return count;
+    return deduped + recovered;
 }
 
 // Format playtime

@@ -13,29 +13,29 @@ export async function getOptimizedImage(urlOrPath: string): Promise<string> {
         return imageCache.get(urlOrPath)!;
     }
 
+    // Remote URLs: return directly so the browser fetches them using WebView2's
+    // shared cookie store (which holds CF clearance from the auth window).
+    // Going through reqwest (fetch_image) would bypass that store and get 403.
+    if (!isLocalPath(urlOrPath)) {
+        imageCache.set(urlOrPath, urlOrPath);
+        return urlOrPath;
+    }
+
     try {
-        // Use read_local_image for on-disk covers, fetch_image for remote URLs
-        const imageBytes = isLocalPath(urlOrPath)
-            ? await invoke<number[]>('read_local_image', { path: urlOrPath })
-            : await invoke<number[]>('fetch_image', { url: urlOrPath });
-
-        const url = urlOrPath; // alias for cache key below
+        const imageBytes = await invoke<number[]>('read_local_image', { path: urlOrPath });
         const uint8Array = new Uint8Array(imageBytes);
-
         const mimeType = getMimeType(urlOrPath);
         const blob = new Blob([uint8Array], { type: mimeType });
         const originalUrl = URL.createObjectURL(blob);
-
         const optimized = await upscaleAndEnhance(originalUrl, mimeType);
-        imageCache.set(url, optimized);
-
+        imageCache.set(urlOrPath, optimized);
         return optimized;
     } catch {
         return '';
     }
 }
 
-function getMimeType(url: string): string {
+export function getMimeType(url: string): string {
     const lower = url.toLowerCase();
     if (lower.endsWith('.png')) return 'image/png';
     if (lower.endsWith('.webp')) return 'image/webp';
@@ -77,7 +77,6 @@ async function upscaleAndEnhance(
             ctx.imageSmoothingQuality = 'high';
             ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
 
-            // Appliquer sharpen
             const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
             const sharpened = applySharpen(imageData);
             ctx.putImageData(sharpened, 0, 0);

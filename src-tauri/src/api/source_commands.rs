@@ -214,6 +214,11 @@ pub async fn load_dynamic_source(
         .as_ref()
         .map(|a| a.requires_webview_fetch)
         .unwrap_or(false);
+    let cloudflare_protected = config
+        .auth
+        .as_ref()
+        .map(|a| a.cloudflare_protected)
+        .unwrap_or(false);
     let cookies = UserSettings::get_cookies(&source_id);
     let is_authenticated = cookies.is_some();
     let has_webview_session = webview_auth::has_auth_webview(&source_id);
@@ -226,16 +231,23 @@ pub async fn load_dynamic_source(
         has_webview_session
     );
 
-    // Use WebView when available (bypasses bot protection opportunistically),
-    // or when the source explicitly requires it.
-    // Only hard-error when the source *requires* WebView but no session exists.
     let use_webview = has_webview_session;
 
     let content = if requires_webview && !use_webview {
         return Err(
             "This source requires an active browser session. Please log in via the source settings first.".to_string()
         );
+    } else if cloudflare_protected && !use_webview {
+        // CF source, no session yet: skip the HTTP attempt (will 403 anyway) and go
+        // straight to WebView2. Saves one wasted round-trip.
+        log::debug!("[SourceLoad] CF source '{}', opening browser session directly", source_id);
+        webview_auth::init_cloudflare_session(&app, &source_id, &config.base_url).await?;
+        webview_auth::fetch_via_webview(&app, &source_id, &url).await?
+    } else if cloudflare_protected {
+        // CF source, session already active.
+        webview_auth::fetch_via_webview(&app, &source_id, &url).await?
     } else if use_webview {
+        // Regular auth session (non-CF) — uses cookie extraction path with HTTP fallback.
         fetch_page_with_webview(app, &source_id, &url, cookies.as_deref(), has_webview_session)
             .await?
     } else {
@@ -283,6 +295,11 @@ pub async fn search_dynamic_source(
         .as_ref()
         .map(|a| a.requires_webview_fetch)
         .unwrap_or(false);
+    let cloudflare_protected = config
+        .auth
+        .as_ref()
+        .map(|a| a.cloudflare_protected)
+        .unwrap_or(false);
     let cookies = UserSettings::get_cookies(&source_id);
     let is_authenticated = cookies.is_some();
     let has_webview_session = webview_auth::has_auth_webview(&source_id);
@@ -298,7 +315,14 @@ pub async fn search_dynamic_source(
     let use_webview = (requires_webview && is_authenticated && has_webview_session)
         || has_webview_session;
 
-    let content = if use_webview {
+    let content = if cloudflare_protected && !use_webview {
+        log::debug!("[SourceSearch] CF source '{}', opening browser session directly", source_id);
+        webview_auth::init_cloudflare_session(&app, &source_id, &config.base_url).await?;
+        webview_auth::fetch_via_webview(&app, &source_id, &url).await?
+    } else if cloudflare_protected {
+        webview_auth::fetch_via_webview(&app, &source_id, &url).await?
+    } else if use_webview {
+        // Regular auth session (non-CF) — uses cookie extraction path with HTTP fallback.
         fetch_page_with_webview(app, &source_id, &url, cookies.as_deref(), has_webview_session)
             .await?
     } else {
