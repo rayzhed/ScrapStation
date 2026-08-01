@@ -190,7 +190,7 @@ impl WebViewDownloader {
         log::info!("[WebViewDownloader] Content-Length: {} bytes", total_size);
 
         // Resolve the best filename from response headers.
-        // CDN URLs (e.g. trashbytes.net/dl/<token>) carry no extension in the path,
+        // CDN URLs often carry no extension in the path,
         // so we check Content-Disposition first, then fall back to Content-Type.
         let actual_destination: PathBuf = {
             let headers = response.headers();
@@ -388,17 +388,19 @@ impl WebViewDownloader {
             }
         });
 
-        // Create webview window with on_download handler to intercept downloads
-        let parsed_url = match url.parse() {
+        // If navigate_from is set, start at that URL so the browser sends it as
+        // Referer when we JS-navigate to the real download URL afterwards.
+        let initial_url_str = config.navigate_from.as_deref().unwrap_or(url);
+        let parsed_url = match initial_url_str.parse() {
             Ok(u) => u,
             Err(e) => {
-                log::error!("[WebViewDownloader] Invalid URL '{}': {}", url, e);
+                log::error!("[WebViewDownloader] Invalid URL '{}': {}", initial_url_str, e);
                 return WebViewDownloadResult {
                     success: false,
                     download_url: None,
                     file_path: None,
                     file_size: None,
-                    error: Some(format!("Invalid URL '{}': {}", url, e)),
+                    error: Some(format!("Invalid URL '{}': {}", initial_url_str, e)),
                     cookies: None,
                 };
             }
@@ -409,7 +411,7 @@ impl WebViewDownloader {
             WebviewUrl::External(parsed_url),
         )
         .title("Download")
-        .visible(false)  // Hidden for production
+        .visible(config.visible)
         .inner_size(1024.0, 768.0)
         .on_download(move |_webview, event| {
             match event {
@@ -484,8 +486,20 @@ impl WebViewDownloader {
 
         log::info!("[WebViewDownloader] WebView created, waiting for page load...");
 
-        // Initial wait for page to load
-        tokio::time::sleep(Duration::from_millis(3000)).await;
+        // Initial wait for the starting page to load
+        tokio::time::sleep(Duration::from_millis(config.navigate_from_wait_ms)).await;
+
+        // If we started at a navigate_from URL, now navigate to the real download
+        // URL. The browser will set Referer to the navigate_from page automatically.
+        if config.navigate_from.is_some() {
+            log::info!("[WebViewDownloader] Navigating to download URL with Referer: {}", url);
+            let nav_script = format!(
+                "window.location.href = '{}';",
+                url.replace('\\', "\\\\").replace('\'', "\\'")
+            );
+            let _ = webview.eval(&nav_script);
+            tokio::time::sleep(Duration::from_millis(config.navigate_from_wait_ms)).await;
+        }
 
         // Inject the capture script with the event name
         let capture_script = self.build_capture_script(&event_name, config);
@@ -508,50 +522,54 @@ impl WebViewDownloader {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Execute extraction based on config
-        if let Some(extract_script) = &config.extract_url_script {
-            log::info!("[WebViewDownloader] Using custom extraction script");
-            let full_script = format!(
-                r#"
-                (async function() {{
-                    try {{
-                        const url = await (async function() {{ {} }})();
-                        if (url) {{
-                            window.__TAURI__.event.emit('{}', {{ url: url }});
+        // Execute extraction based on config.
+        // When intercept_download is true, the on_download handler captures the URL
+        // automatically — no click or script extraction needed.
+        if !config.intercept_download {
+            if let Some(extract_script) = &config.extract_url_script {
+                log::info!("[WebViewDownloader] Using custom extraction script");
+                let full_script = format!(
+                    r#"
+                    (async function() {{
+                        try {{
+                            const url = await (async function() {{ {} }})();
+                            if (url) {{
+                                window.__TAURI__.event.emit('{}', {{ url: url }});
+                            }}
+                        }} catch(e) {{
+                            console.error('Extraction failed:', e);
                         }}
-                    }} catch(e) {{
-                        console.error('Extraction failed:', e);
-                    }}
-                }})();
-                "#,
-                extract_script, event_name
-            );
-            if let Err(e) = webview.eval(&full_script) {
-                log::error!("[WebViewDownloader] Extraction script failed: {}", e);
-            }
-        } else if let Some(click_selector) = &config.click {
-            log::info!("[WebViewDownloader] Clicking selector: {}", click_selector);
-            let click_script = format!(
-                r#"
-                (function() {{
-                    const el = document.querySelector('{}');
-                    if (el) {{
-                        // If it has an href, capture it before clicking
-                        if (el.href && !el.href.startsWith('javascript:')) {{
-                            window.__TAURI__.event.emit('{}', {{ url: el.href }});
+                    }})();
+                    "#,
+                    extract_script, event_name
+                );
+                if let Err(e) = webview.eval(&full_script) {
+                    log::error!("[WebViewDownloader] Extraction script failed: {}", e);
+                }
+            } else if let Some(click_selector) = &config.click {
+                log::info!("[WebViewDownloader] Clicking selector: {}", click_selector);
+                let click_script = format!(
+                    r#"
+                    (function() {{
+                        const el = document.querySelector('{}');
+                        if (el) {{
+                            // If it has an href, capture it before clicking
+                            if (el.href && !el.href.startsWith('javascript:')) {{
+                                window.__TAURI__.event.emit('{}', {{ url: el.href }});
+                            }}
+                            el.click();
+                        }} else {{
+                            console.error('Element not found:', '{}');
                         }}
-                        el.click();
-                    }} else {{
-                        console.error('Element not found:', '{}');
-                    }}
-                }})();
-                "#,
-                click_selector.replace('\'', "\\'"),
-                event_name,
-                click_selector.replace('\'', "\\'")
-            );
-            if let Err(e) = webview.eval(&click_script) {
-                log::error!("[WebViewDownloader] Click script failed: {}", e);
+                    }})();
+                    "#,
+                    click_selector.replace('\'', "\\'"),
+                    event_name,
+                    click_selector.replace('\'', "\\'")
+                );
+                if let Err(e) = webview.eval(&click_script) {
+                    log::error!("[WebViewDownloader] Click script failed: {}", e);
+                }
             }
         }
 
@@ -576,7 +594,8 @@ impl WebViewDownloader {
 
             let has_url = download_state.lock().ok()
                 .map(|s| s.captured_download_url.is_some())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || captured_url.lock().ok().map(|g| g.is_some()).unwrap_or(false);
 
             if has_url {
                 log::info!("[WebViewDownloader] Download URL captured, proceeding with cookie extraction...");
@@ -584,25 +603,22 @@ impl WebViewDownloader {
             }
 
             // For timer-based hosts: periodically try clicking download buttons
-            // This handles cases where a timer completes and a new button appears
+            // This handles cases where a timer completes and a new button appears.
+            // Re-injecting the capture script also covers hosts that redirect to a
+            // different domain before the download button is available.
             if let Some(ref selector) = click_selector {
                 if last_click_time.elapsed() >= click_retry_interval {
+                    let _ = webview.eval(&capture_script);
                     log::debug!("[WebViewDownloader] Re-trying click on selector: {}", selector);
                     let retry_click_script = format!(
                         r#"
                         (function() {{
-                            // Try multiple download button selectors
-                            const selectors = ['{}', 'a[href*="download"]', 'button[class*="download"]', '#downloadButton', '.download-btn', 'a.btn-download'];
-                            for (const sel of selectors) {{
-                                const el = document.querySelector(sel);
-                                if (el && el.offsetParent !== null) {{ // Check if visible
-                                    console.log('[CrackStation] Clicking:', sel);
-                                    if (el.href && !el.href.startsWith('javascript:')) {{
-                                        window.__TAURI__.event.emit('{}', {{ url: el.href }});
-                                    }}
-                                    el.click();
-                                    break;
+                            const el = document.querySelector('{}');
+                            if (el && el.offsetParent !== null) {{
+                                if (el.href && !el.href.startsWith('javascript:')) {{
+                                    window.__TAURI__.event.emit('{}', {{ url: el.href }});
                                 }}
+                                el.click();
                             }}
                         }})();
                         "#,
@@ -617,11 +633,30 @@ impl WebViewDownloader {
             tokio::time::sleep(poll_interval).await;
         }
 
-        // Get the captured download URL and destination
+        // Get the captured download URL and destination.
+        // Two sources: on_download handler (sets download_state) and JS event emitter
+        // (sets captured_url via extract_url_script). Prefer on_download since it
+        // includes the destination path; fall back to captured_url and derive the path.
         let (captured_download_url, destination_path) = {
-            let state = download_state.lock().ok();
-            state.map(|s| (s.captured_download_url.clone(), s.destination_path.clone()))
-                .unwrap_or((None, None))
+            let from_state = download_state.lock().ok()
+                .and_then(|s| s.captured_download_url.clone().map(|u| (u, s.destination_path.clone())));
+
+            if let Some((url, path)) = from_state {
+                (Some(url), path)
+            } else {
+                let url = captured_url.lock().ok().and_then(|g| g.clone());
+                let path = url.as_ref().and_then(|u| {
+                    let filename = u.parse::<url::Url>().ok()
+                        .and_then(|p| p.path_segments().and_then(|segs| segs.last().map(|s| s.to_string())))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "download".to_string());
+                    let filename = urlencoding::decode(&filename)
+                        .map(|s| s.to_string())
+                        .unwrap_or(filename);
+                    Some(crate::engine::get_download_folder(&self.app_handle).join(filename))
+                });
+                (url, path)
+            }
         };
 
         // If we captured a URL, download using reqwest with cookies
@@ -1080,109 +1115,116 @@ impl WebViewDownloader {
         format!(
             r#"
             (function() {{
+                if (window.__CS_CAPTURE_ACTIVE__) return;
+                window.__CS_CAPTURE_ACTIVE__ = true;
                 console.log('[CrackStation] Download capture script injected');
 
-                // Pattern to match download URLs
                 const urlPattern = '{}';
                 const patternRegex = urlPattern ? new RegExp(urlPattern) : null;
 
-                // Function to check if URL is a download URL
                 function isDownloadUrl(url) {{
                     if (!url) return false;
                     if (patternRegex && patternRegex.test(url)) return true;
-                    // Common download patterns
                     if (url.includes('/download') || url.includes('dl=') || url.includes('.torrent')) return true;
                     if (url.match(/\.(zip|rar|7z|exe|iso|torrent|bin)(\?|$)/i)) return true;
                     return false;
                 }}
 
+                let emitted = false;
                 const emitUrl = function(url) {{
+                    if (emitted) return;
                     const full = url.startsWith('/') ? window.location.origin + url : url;
                     console.log('[CrackStation] Emitting download URL:', full);
+                    emitted = true;
                     window.__TAURI__.event.emit('{}', {{ url: full }});
                 }};
 
-                // Override XMLHttpRequest — intercept both the request URL and the
-                // response (HX-Redirect header, responseURL after HTTP redirects,
-                // or a URL found in the response body).
+                // Intercept ALL XHR responses — HX-Redirect can come from any endpoint
+                // (e.g. HTMX triggers a request to /f/<id> whose response header carries
+                // the CDN redirect, and that path doesn't match isDownloadUrl).
                 const originalXHROpen = XMLHttpRequest.prototype.open;
                 XMLHttpRequest.prototype.open = function(method, url) {{
                     const urlStr = typeof url === 'string' ? url : (url || '').toString();
-                    if (isDownloadUrl(urlStr)) {{
-                        console.log('[CrackStation] XHR download request intercepted:', urlStr);
-                        this.addEventListener('load', function() {{
-                            // Priority 1: HTMX redirect header
-                            try {{
-                                const hxRedirect = this.getResponseHeader('HX-Redirect');
-                                if (hxRedirect) {{ emitUrl(hxRedirect); return; }}
-                            }} catch(e) {{}}
-                            // Priority 2: HTTP redirect — responseURL differs from request URL
-                            const absReq = urlStr.startsWith('/') ? window.location.origin + urlStr : urlStr;
-                            if (this.responseURL && this.responseURL !== absReq) {{
-                                emitUrl(this.responseURL); return;
-                            }}
-                            // Priority 3: URL embedded in response body
-                            try {{
-                                const m = this.responseText && this.responseText.match(/(https?:\/\/[^\s"'<>]{{20,}})/);
-                                if (m) {{ emitUrl(m[1]); return; }}
-                            }} catch(e) {{}}
-                            // Fallback: emit the request URL itself so the download manager
-                            // can try a direct fetch (may work for simple hosters)
-                            emitUrl(urlStr);
-                        }});
-                    }}
+                    this.addEventListener('load', function() {{
+                        // Priority 1: HTMX / server-sent redirect header on ANY response
+                        try {{
+                            const hxRedirect = this.getResponseHeader('HX-Redirect');
+                            if (hxRedirect) {{ emitUrl(hxRedirect); return; }}
+                        }} catch(e) {{}}
+                        // Priority 2: only continue if this looks like a download request
+                        if (!isDownloadUrl(urlStr)) return;
+                        // Priority 3: HTTP redirect — responseURL differs from request URL
+                        const absReq = urlStr.startsWith('/') ? window.location.origin + urlStr : urlStr;
+                        if (this.responseURL && this.responseURL !== absReq) {{
+                            emitUrl(this.responseURL); return;
+                        }}
+                        // Priority 4: URL embedded in response body
+                        try {{
+                            const m = this.responseText && this.responseText.match(/(https?:\/\/[^\s"'<>]{{20,}})/);
+                            if (m) {{ emitUrl(m[1]); return; }}
+                        }} catch(e) {{}}
+                        emitUrl(urlStr);
+                    }});
                     return originalXHROpen.apply(this, arguments);
                 }};
 
-                // Override fetch to catch fetch-based download URLs
+                // Intercept ALL fetch responses for HX-Redirect, then fall through to
+                // isDownloadUrl check for redirect/body extraction.
                 const originalFetch = window.fetch;
                 window.fetch = function(url, options) {{
                     const urlStr = typeof url === 'string' ? url : (url && url.url) || '';
-                    if (isDownloadUrl(urlStr)) {{
-                        console.log('[CrackStation] Fetch download URL detected:', urlStr);
-                        return originalFetch.apply(this, arguments).then(function(resp) {{
-                            const hxRedirect = resp.headers.get('HX-Redirect');
-                            if (hxRedirect) {{ emitUrl(hxRedirect); }}
-                            else if (resp.redirected) {{ emitUrl(resp.url); }}
-                            else {{ emitUrl(urlStr); }}
-                            return resp;
-                        }});
-                    }}
-                    return originalFetch.apply(this, arguments);
+                    return originalFetch.apply(this, arguments).then(function(resp) {{
+                        const hxRedirect = resp.headers.get('HX-Redirect');
+                        if (hxRedirect) {{ emitUrl(hxRedirect); return resp; }}
+                        if (!isDownloadUrl(urlStr)) return resp;
+                        if (resp.redirected) {{ emitUrl(resp.url); }}
+                        else {{ emitUrl(urlStr); }}
+                        return resp;
+                    }});
                 }};
 
-                // Monitor for clicks on download links
+                // Intercept window.location changes (JS-driven redirects to CDN URLs)
+                const locDesc = Object.getOwnPropertyDescriptor(window, 'location')
+                    || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(window), 'location');
+                if (locDesc && locDesc.set) {{
+                    const origSet = locDesc.set.bind(window);
+                    Object.defineProperty(window, 'location', {{
+                        set: function(v) {{
+                            const s = String(v);
+                            if (isDownloadUrl(s)) emitUrl(s);
+                            origSet(v);
+                        }},
+                        get: locDesc.get ? locDesc.get.bind(window) : undefined,
+                        configurable: true,
+                    }});
+                }}
+
+                // Monitor clicks on direct download links
                 document.addEventListener('click', function(e) {{
                     const link = e.target.closest('a');
                     if (link && link.href && isDownloadUrl(link.href)) {{
-                        console.log('[CrackStation] Click download URL detected:', link.href);
-                        window.__TAURI__.event.emit('{}', {{ url: link.href }});
+                        emitUrl(link.href);
                     }}
                 }}, true);
 
-                // Monitor for dynamic content
+                // Watch for dynamically added download links
                 const observer = new MutationObserver(function(mutations) {{
                     mutations.forEach(function(mutation) {{
                         mutation.addedNodes.forEach(function(node) {{
                             if (node.querySelectorAll) {{
-                                const links = node.querySelectorAll('a[href]');
-                                links.forEach(function(link) {{
-                                    if (isDownloadUrl(link.href)) {{
-                                        console.log('[CrackStation] Dynamic download link found:', link.href);
-                                        window.__TAURI__.event.emit('{}', {{ url: link.href }});
-                                    }}
+                                node.querySelectorAll('a[href]').forEach(function(link) {{
+                                    if (isDownloadUrl(link.href)) emitUrl(link.href);
                                 }});
                             }}
                         }});
                     }});
                 }});
-
                 observer.observe(document.body, {{ childList: true, subtree: true }});
 
                 console.log('[CrackStation] Download monitoring active');
             }})();
             "#,
-            url_pattern, event_name, event_name, event_name
+            url_pattern, event_name
         )
     }
 

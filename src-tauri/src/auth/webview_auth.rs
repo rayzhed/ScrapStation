@@ -50,6 +50,262 @@ pub fn has_auth_webview(source_id: &str) -> bool {
     AUTH_WEBVIEWS.lock().unwrap().get(source_id).copied().unwrap_or(false)
 }
 
+/// Open a hidden WebView to `base_url` and wait for Cloudflare's JS challenge
+/// to resolve. The window is kept alive so subsequent `fetch_via_webview` calls
+/// can run `fetch()` from inside it using WebView2's real Chrome TLS fingerprint.
+pub async fn init_cloudflare_session(
+    app: &AppHandle,
+    source_id: &str,
+    base_url: &str,
+) -> Result<(), String> {
+    if is_already_authenticated(source_id) {
+        return Ok(());
+    }
+
+    let base_url_parsed: url::Url = base_url
+        .parse()
+        .map_err(|e| format!("Invalid base URL: {}", e))?;
+
+    let window_id = format!("auth-{}", source_id);
+
+    if app.get_webview_window(&window_id).is_none() {
+        WebviewWindowBuilder::new(app, &window_id, WebviewUrl::External(base_url_parsed.clone()))
+            .title("Connecting...")
+            .visible(false)
+            .inner_size(800.0, 600.0)
+            .build()
+            .map_err(|e| format!("Failed to create CF session window: {}", e))?;
+    }
+
+    let window = app
+        .get_webview_window(&window_id)
+        .ok_or_else(|| format!("Failed to get CF session window for '{}'", source_id))?;
+
+    // Poll for cf_clearance instead of a fixed sleep.
+    // CF JS challenge typically completes in 1–2 s; we exit as soon as the cookie appears.
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        if let Ok(cookies) = window.cookies_for_url(base_url_parsed.clone()) {
+            let cookie_str = cookies_to_string(&cookies);
+            if has_session_cookie(&cookie_str, "cf_clearance") {
+                log::info!("[CFSession] cf_clearance obtained for '{}' in {:.1}s",
+                    source_id,
+                    start.elapsed().as_secs_f32()
+                );
+                break;
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            log::warn!("[CFSession] No cf_clearance after 10 s for '{}', proceeding anyway", source_id);
+            break;
+        }
+    }
+
+    mark_authenticated(source_id);
+    log::info!("[CFSession] Session ready for '{}'", source_id);
+    Ok(())
+}
+
+/// Bind a loopback TCP listener, inject the script returned by `make_script(port)`
+/// into `window`, then wait up to 30 s for the browser to HTTP-POST its result back.
+/// Returns the raw POST body bytes. Chrome exempts loopback from mixed-content rules.
+async fn tcp_relay_eval(
+    window: &tauri::WebviewWindow,
+    make_script: impl FnOnce(u16) -> String + Send,
+) -> Result<Vec<u8>, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Failed to bind local listener: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local port: {}", e))?
+        .port();
+
+    let script = make_script(port);
+    window
+        .eval(&script)
+        .map_err(|e| format!("Failed to inject script: {}", e))?;
+
+    let (stream, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        listener.accept(),
+    )
+    .await
+    .map_err(|_| "WebView fetch timed out after 30 s".to_string())?
+    .map_err(|e| format!("TCP accept error: {}", e))?;
+
+    let (reader_half, mut writer_half) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader_half);
+
+    let mut content_length: usize = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("Header read error: {}", e))?;
+        let trimmed = line.trim_end_matches(|c: char| c == '\r' || c == '\n');
+        if trimmed.is_empty() {
+            break;
+        }
+        if trimmed.to_lowercase().starts_with("content-length:") {
+            if let Some(v) = trimmed.splitn(2, ':').nth(1) {
+                content_length = v.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+
+    let mut body_bytes = vec![0u8; content_length];
+    if content_length > 0 {
+        reader
+            .read_exact(&mut body_bytes)
+            .await
+            .map_err(|e| format!("Body read error: {}", e))?;
+    }
+
+    let _ = writer_half
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .await;
+
+    Ok(body_bytes)
+}
+
+/// Fetch `url` from inside an existing CF-session WebView using a local TCP relay.
+/// JS POSTs the response JSON to a Rust-owned `127.0.0.1:0` listener.
+pub async fn fetch_via_webview(
+    app: &AppHandle,
+    source_id: &str,
+    url: &str,
+) -> Result<String, String> {
+    let window_id = format!("auth-{}", source_id);
+    let window = app
+        .get_webview_window(&window_id)
+        .ok_or_else(|| format!("No CF session window for '{}' — call init_cloudflare_session first", source_id))?;
+
+    let url_js = serde_json::to_string(url).unwrap_or_else(|_| format!("\"{}\"", url));
+
+    let body_bytes = tcp_relay_eval(&window, move |port| {
+        format!(
+            r#"(async () => {{
+    try {{
+        const resp = await fetch({url_js}, {{credentials: 'include'}});
+        const body = await resp.text();
+        const payload = JSON.stringify({{ok: resp.ok, status: resp.status, body: body}});
+        await fetch('http://127.0.0.1:{port}/', {{method: 'POST', mode: 'no-cors', body: payload}});
+    }} catch (e) {{
+        const payload = JSON.stringify({{ok: false, status: 0, body: '', error: String(e)}});
+        await fetch('http://127.0.0.1:{port}/', {{method: 'POST', mode: 'no-cors', body: payload}});
+    }}
+}})();"#,
+            url_js = url_js,
+            port = port
+        )
+    })
+    .await?;
+
+    log::debug!("[CFRelay] Received {} bytes from WebView", body_bytes.len());
+
+    if body_bytes.is_empty() {
+        return Err("WebView returned empty response (script may not have executed)".to_string());
+    }
+
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let parsed: serde_json::Value = serde_json::from_str(&body_str)
+        .map_err(|e| format!("Failed to parse WebView payload: {} | raw: {}", e, &body_str[..body_str.len().min(200)]))?;
+
+    if let Some(err) = parsed.get("error").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        return Err(format!("WebView fetch error: {}", err));
+    }
+
+    let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !ok {
+        let status = parsed.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+        return Err(format!("HTTP error: {}", status));
+    }
+
+    parsed
+        .get("body")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No body field in WebView response payload".to_string())
+}
+
+/// Same as `fetch_via_webview` but returns raw bytes. JS encodes via `FileReader.readAsDataURL`;
+/// Rust base64-decodes the result.
+pub async fn fetch_binary_via_webview(
+    app: &AppHandle,
+    source_id: &str,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    let window_id = format!("auth-{}", source_id);
+    let window = app
+        .get_webview_window(&window_id)
+        .ok_or_else(|| format!("No CF session window for '{}'", source_id))?;
+
+    let url_js = serde_json::to_string(url).unwrap_or_else(|_| format!("\"{}\"", url));
+
+    let body_bytes = tcp_relay_eval(&window, move |port| {
+        format!(
+            r#"(async () => {{
+    try {{
+        const resp = await fetch({url_js}, {{credentials: 'include'}});
+        const blob = await resp.blob();
+        const dataUrl = await new Promise((res, rej) => {{
+            const r = new FileReader();
+            r.onloadend = () => res(r.result);
+            r.onerror = rej;
+            r.readAsDataURL(blob);
+        }});
+        const payload = JSON.stringify({{ok: resp.ok, status: resp.status, body: dataUrl || ''}});
+        await fetch('http://127.0.0.1:{port}/', {{method: 'POST', mode: 'no-cors', body: payload}});
+    }} catch (e) {{
+        const payload = JSON.stringify({{ok: false, status: 0, body: '', error: String(e)}});
+        await fetch('http://127.0.0.1:{port}/', {{method: 'POST', mode: 'no-cors', body: payload}});
+    }}
+}})();"#,
+            url_js = url_js,
+            port = port
+        )
+    })
+    .await?;
+
+    if body_bytes.is_empty() {
+        return Err("WebView returned empty image response".to_string());
+    }
+
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let parsed: serde_json::Value = serde_json::from_str(&body_str)
+        .map_err(|e| format!("Failed to parse image payload: {}", e))?;
+
+    if let Some(err) = parsed.get("error").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        return Err(format!("Image fetch error: {}", err));
+    }
+
+    let data_url = parsed
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // data URL format: "data:<mime>;base64,<data>"
+    let base64_data = data_url
+        .find(',')
+        .map(|i| &data_url[i + 1..])
+        .ok_or("Invalid data URL: no comma separator")?;
+
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(base64_data)
+        .map_err(|e| format!("Base64 decode error: {}", e))
+}
+
 fn mark_authenticated(source_id: &str) {
     AUTH_WEBVIEWS.lock().unwrap().insert(source_id.to_string(), true);
 }

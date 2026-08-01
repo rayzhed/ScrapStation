@@ -13,6 +13,7 @@
     import { getVersion } from '@tauri-apps/api/app';
     import { animate } from 'motion';
 
+    import SplashScreen from '$lib/components/SplashScreen.svelte';
     import Header from '$lib/components/Header.svelte';
     import SourceBar from '$lib/components/SourceBar.svelte';
     import GameGrid from '$lib/components/GameGrid.svelte';
@@ -26,11 +27,23 @@
     const appWindow = getCurrentWindow();
     let isMaximized = false;
     let isDevBuild = false;
+    let splashPhase: 'intro' | 'outro' | 'hidden' = 'intro';
+    let isClosing = false;
+    let unlistenClose: (() => void) | null = null;
 
     async function refreshMaximized() { isMaximized = await appWindow.isMaximized(); }
     async function minimize()         { await appWindow.minimize(); }
     async function toggleMaximize()   { await appWindow.toggleMaximize(); await refreshMaximized(); }
-    async function close()            { await appWindow.close(); }
+    async function close() {
+        if (isClosing) return;
+        isClosing = true;
+        // Remove the onCloseRequested listener before calling appWindow.close()
+        // so the programmatic close goes straight through without re-triggering the handler.
+        if (unlistenClose) { unlistenClose(); unlistenClose = null; }
+        splashPhase = 'outro';
+        await new Promise<void>(r => setTimeout(r, 500));
+        await appWindow.close();
+    }
 
     let searchQuery = '';
     let selectedGameIndex = -1;
@@ -54,8 +67,17 @@
         await initLibraryEvents();
         await initSourceWatcher();
         loadStorageConfig().catch(() => {});
-        // Silent update check — result is reflected in updateState store
         checkForUpdates().catch(() => {});
+
+        // Dismiss intro splash after animation completes (0.55s icon + ~0.8s letters + 0.5s fade = 1.85s anim → hide at 2.3s)
+        setTimeout(() => { splashPhase = 'hidden'; }, 2300);
+
+        // Intercept system-level close (Alt+F4, taskbar) to show outro.
+        // Store the unlisten so close() can remove it before re-closing programmatically.
+        unlistenClose = await appWindow.onCloseRequested(async (e) => {
+            e.preventDefault();
+            await close();
+        });
     });
 
     function handleSearch() {
@@ -260,6 +282,10 @@
     {/if}
 </main>
 
+{#if splashPhase !== 'hidden'}
+    <SplashScreen phase={splashPhase} />
+{/if}
+
 <style>
     .dev-titlebar::before {
         content: '';
@@ -281,4 +307,5 @@
         from { background-position: 0 0; }
         to   { background-position: 45.3px 0; }
     }
+
 </style>

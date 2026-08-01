@@ -85,10 +85,30 @@ pub struct WebViewDownloadConfig {
     /// Regex pattern to match download URLs (for interception)
     #[serde(default)]
     pub download_url_pattern: Option<String>,
+
+    /// Show the WebView window (required for hosts that need a visible browser
+    /// to pass Cloudflare or similar challenges before the page content loads)
+    #[serde(default)]
+    pub visible: bool,
+
+    /// Navigate to this URL first before navigating to the actual download URL.
+    /// The browser will send this page as the Referer on the subsequent navigation,
+    /// which is required by hosts that block direct navigation (hotlink protection).
+    #[serde(default)]
+    pub navigate_from: Option<String>,
+
+    /// How long to wait (ms) after the navigate_from page loads before JS-navigating
+    /// to the real download URL. Increase for slow-loading intermediate pages.
+    #[serde(default = "default_navigate_wait")]
+    pub navigate_from_wait_ms: u64,
 }
 
 fn default_wait_timeout() -> u64 {
     30000 // 30 seconds default
+}
+
+fn default_navigate_wait() -> u64 {
+    3000
 }
 
 /// Display configuration for a host

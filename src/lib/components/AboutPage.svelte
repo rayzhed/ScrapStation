@@ -66,7 +66,7 @@
                 </div>
                 <div>
                     <p class="text-sm font-bold tracking-widest" style="color: var(--label-primary); letter-spacing: 0.1em;">SCRAPSTATION</p>
-                    <p class="text-[11px] font-mono mt-1.5" style="color: var(--label-quaternary);">v{APP_VERSION}</p>
+                    <p class="text-[11px] font-mono mt-1.5" style="color: var(--label-quaternary);" title="mak">v{APP_VERSION}</p>
                 </div>
                 <p class="text-[12px] leading-relaxed" style="color: var(--label-tertiary);">
                     A dynamic, source-driven game launcher. Drop a YAML config to browse, download, and manage games from any compatible source.

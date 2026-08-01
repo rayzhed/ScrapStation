@@ -239,20 +239,34 @@ async fn run_smart_download_background(
     log::info!("[SmartDownloadBg] Starting background download: {}", download_id);
 
     // Fast path: probe already resolved the URL — skip all resolution and go straight to streaming.
+    // Skip this for webview hosts: they need the full WebView download path (which has its own
+    // reqwest-fail → WebView-fallback logic) because the CDN may block plain reqwest connections.
     if let Some(direct_url) = pre_resolved_url {
-        log::info!("[SmartDownloadBg] Using pre-resolved URL from probe, skipping resolution: {}", direct_url);
-        let source_cookies = UserSettings::get_cookies(&source_id);
-        let effective_cookies = pre_cookies.or(source_cookies);
-        return perform_streaming_download_bg(
-            app_handle,
-            direct_url,
-            filename_hint,
-            download_id,
-            tracker,
-            effective_cookies,
-            download_dir,
-            install_dir,
-        ).await;
+        let is_webview_host = SourceLoader::load_by_id(&source_id).ok()
+            .and_then(|c| c.hosts)
+            .map(|hosts| {
+                let (_, hc) = host_detector::detect_host_with_config(&url, Some(&hosts));
+                hc.map(|h| h.download_method == DownloadMethod::Webview).unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        if !is_webview_host {
+            log::info!("[SmartDownloadBg] Using pre-resolved URL from probe, skipping resolution: {}", direct_url);
+            let source_cookies = UserSettings::get_cookies(&source_id);
+            let effective_cookies = pre_cookies.or(source_cookies);
+            return perform_streaming_download_bg(
+                app_handle,
+                direct_url,
+                filename_hint,
+                download_id,
+                tracker,
+                effective_cookies,
+                download_dir,
+                install_dir,
+            ).await;
+        }
+
+        log::info!("[SmartDownloadBg] Webview host — skipping fast path, using WebView download");
     }
 
     let config = SourceLoader::load_by_id(&source_id)?;
@@ -350,6 +364,32 @@ async fn run_smart_download_background(
 
                 return Err(error_msg);
             }
+        }
+    }
+
+    // Api host: apply host-level resolver steps to transform to a direct download URL
+    if let Some(hc) = host_config.as_ref().filter(|h| h.download_method == DownloadMethod::Api) {
+        if hc.resolver.is_some() {
+            log::info!("[SmartDownloadBg] Api host — applying host resolver");
+            let probe_client = reqwest::Client::builder()
+                .user_agent(crate::constants::USER_AGENT)
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .build()
+                .unwrap_or_default();
+            let http_client = HttpClient::new(probe_client);
+            let manager = DownloadManager::new(http_client);
+            let direct_url = manager.resolve_for_probe(&resolved_url, config.hosts.as_ref()).await;
+            log::info!("[SmartDownloadBg] Api host resolved URL: {}", direct_url);
+            return perform_streaming_download_bg(
+                app_handle,
+                direct_url,
+                filename_hint,
+                download_id,
+                tracker,
+                cookies,
+                download_dir,
+                install_dir,
+            ).await;
         }
     }
 
@@ -1043,13 +1083,12 @@ async fn resume_download_task(
 
     log::info!("[ResumeDownload] Resuming download: {} from {} bytes", entry.id, entry.downloaded_bytes);
 
-    // CRITICAL: Use the resolved URL if available (the actual download link)
-    // The original URL might be a page (gofile.io/d/xxx) not a direct download
+    // Use the resolved URL if available — the original URL may be a page, not a direct download link
     let download_url = entry.resolved_url.as_ref().unwrap_or(&entry.url);
     log::info!("[ResumeDownload] Using URL: {}", download_url);
 
     if entry.resolved_url.is_none() {
-        log::warn!("[ResumeDownload] No resolved URL - this might not work for hosts like gofile!");
+        log::warn!("[ResumeDownload] No resolved URL saved — resume may not work for indirect download links");
     }
 
     let download_folder = get_download_folder(&app_handle);

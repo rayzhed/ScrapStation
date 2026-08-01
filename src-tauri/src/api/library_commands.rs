@@ -606,6 +606,18 @@ pub async fn repair_library(
         }).collect()
     };
 
+    // Secondary index: last two path components normalised to lowercase with backslashes.
+    // e.g. "D:\Library\my-game\game" → "my-game\game".
+    // Allows matching even when the stored root differs (drive letter changed, root moved, etc.)
+    // or the stored path used forward slashes.
+    let existing_by_tail: HashMap<String, &LibraryGame> = existing.iter().filter_map(|(abs, g)| {
+        let p = std::path::Path::new(abs);
+        let tail: std::path::PathBuf = p.components().rev().take(2).collect::<Vec<_>>()
+            .into_iter().rev().collect();
+        let key = tail.to_string_lossy().to_lowercase().replace('/', "\\");
+        if key.is_empty() { None } else { Some((key, g)) }
+    }).collect();
+
     let mut fixed = 0usize;
     // Track which game IDs were already handled in phase 1
     let mut handled_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -632,7 +644,11 @@ pub async fn repair_library(
                 .unwrap_or("unknown")
                 .to_string();
 
-            if let Some(game) = existing.get(&game_path_str) {
+            // Normalised tail key for the secondary lookup
+            let tail_key = format!("{}\\game", folder_name.to_lowercase());
+
+            if let Some(game) = existing.get(&game_path_str)
+                .or_else(|| existing_by_tail.get(&tail_key).copied()) {
                 // ── Already tracked: patch what's missing ────────────────
                 handled_ids.insert(game.id.clone());
                 let mut updated = false;
@@ -740,6 +756,59 @@ pub async fn repair_library(
 
     log::info!("[Library] Repair complete: {} item(s) added/updated", fixed);
     Ok(fixed)
+}
+
+/// Remove duplicate library entries that point to the same game folder.
+/// When duplicates exist the entry with the richest data is kept
+/// (non-recovered source preferred; then more executables; then longer playtime).
+/// Returns the number of duplicate entries removed.
+#[tauri::command]
+pub async fn dedup_library(
+    app_handle: AppHandle,
+    tracker: State<'_, Arc<TokioMutex<LibraryTracker>>>,
+) -> Result<usize, String> {
+    let all_games = {
+        let t = tracker.lock().await;
+        t.get_all_games().await
+    };
+
+    // Group games by normalised two-component path tail (e.g. "my-game\game")
+    let mut by_tail: HashMap<String, Vec<LibraryGame>> = HashMap::new();
+    for game in all_games {
+        let abs = resolve_install_path(&game, &app_handle);
+        let tail: std::path::PathBuf = abs.components().rev().take(2).collect::<Vec<_>>()
+            .into_iter().rev().collect();
+        let key = tail.to_string_lossy().to_lowercase().replace('/', "\\");
+        by_tail.entry(key).or_default().push(game);
+    }
+
+    let mut removed = 0usize;
+    for (_, mut group) in by_tail {
+        if group.len() <= 1 { continue; }
+
+        // Score each entry: higher is better.
+        // Prefer real source over "recovered", more executables, more playtime.
+        let score = |g: &LibraryGame| -> i64 {
+            let source_bonus: i64 = if g.source_slug != "recovered" { 1000 } else { 0 };
+            let exe_bonus: i64 = g.executables.len() as i64 * 10;
+            let play_bonus: i64 = if g.total_playtime > 0 { 100 } else { 0 };
+            let cover_bonus: i64 = if g.cover_path.is_some() { 10 } else { 0 };
+            source_bonus + exe_bonus + play_bonus + cover_bonus
+        };
+
+        group.sort_by(|a, b| score(b).cmp(&score(a)));
+
+        // Keep the first (best) entry; remove the rest
+        for dupe in group.into_iter().skip(1) {
+            log::info!("[Library] Dedup: removing duplicate entry '{}' ({})", dupe.title, dupe.id);
+            let t = tracker.lock().await;
+            t.remove_game(&dupe.id).await?;
+            removed += 1;
+        }
+    }
+
+    log::info!("[Library] Dedup complete: {} duplicate(s) removed", removed);
+    Ok(removed)
 }
 
 /// Find the first matching cover image for a slug in the covers directory.

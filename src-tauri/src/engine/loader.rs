@@ -3,6 +3,34 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::env;
 
+// Default sources bundled into the binary so the release build works without
+// manual file copying. Written to the user's sources dir on first run (or when
+// the file is absent). Existing files are never overwritten so user edits survive.
+const BUNDLED_SOURCES: &[(&str, &str)] = &[
+    ("steamrip.yaml",  include_str!("../../sources/steamrip.yaml")),
+    ("onlinefix.yaml", include_str!("../../sources/onlinefix.yaml")),
+];
+
+fn seed_default_sources(sources_dir: &PathBuf) {
+    for (name, content) in BUNDLED_SOURCES {
+        // Skip sources that were compiled as empty stubs (CI build without real YAMLs).
+        if content.is_empty() {
+            continue;
+        }
+        let dest = sources_dir.join(name);
+        // Always overwrite bundled defaults so updates ship with new builds.
+        // User-created sources (any other filename) are never touched.
+        let current = fs::read_to_string(&dest).unwrap_or_default();
+        if current != *content {
+            if let Err(e) = fs::write(&dest, content) {
+                log::warn!("[SourceLoader] Failed to update '{}': {}", name, e);
+            } else {
+                log::info!("[SourceLoader] Updated bundled source '{}'", name);
+            }
+        }
+    }
+}
+
 pub struct SourceLoader;
 
 impl SourceLoader {
@@ -31,6 +59,8 @@ impl SourceLoader {
         if !sources_dir.exists() {
             let _ = fs::create_dir_all(&sources_dir);
         }
+
+        seed_default_sources(&sources_dir);
 
         sources_dir
     }

@@ -2,7 +2,8 @@
     import { onMount } from 'svelte';
     import { inView, animate } from 'motion';
     import { Gamepad2, CheckCircle2, Download, Loader2, AlertTriangle } from 'lucide-svelte';
-    import { getOptimizedImage } from '$lib/utils/imageProcessor';
+    import { invoke } from '@tauri-apps/api/core';
+    import { getOptimizedImage, getMimeType } from '$lib/utils/imageProcessor';
     import type { GameCard } from '$lib/types';
     import type { GameGlobalStatus } from '$lib/stores/gameStatus';
     import { navigateTo } from '$lib/stores/navigation';
@@ -12,23 +13,47 @@
     export let status: GameGlobalStatus = { phase: 'none' };
     export let index = 0;
     export let sourceColor = '#ffffff';
+    export let sourceId = '';
 
     let cardEl: HTMLDivElement;
     let imageSrc = '';
     let imageLoading = true;
     let imageError = false;
+    let cfFallbackAttempted = false;
 
     $: loadImage(game.cover_url);
 
     async function loadImage(url: string) {
         imageLoading = true;
         imageError = false;
+        cfFallbackAttempted = false;
         try {
             imageSrc = await getOptimizedImage(url);
         } catch {
             imageError = true;
         } finally {
             imageLoading = false;
+        }
+    }
+
+    // Called when the <img> fails to load (e.g. CF blocks direct image requests).
+    // Retries via the CF-session WebView relay before showing the error state.
+    async function handleImageError() {
+        if (cfFallbackAttempted || !game.cover_url || !sourceId) {
+            imageError = true;
+            return;
+        }
+        cfFallbackAttempted = true;
+        try {
+            const bytes = await invoke<number[]>('fetch_cf_image', {
+                sourceId,
+                url: game.cover_url,
+            });
+            if (bytes.length === 0) throw new Error('empty');
+            const blob = new Blob([new Uint8Array(bytes)], { type: getMimeType(game.cover_url) });
+            imageSrc = URL.createObjectURL(blob);
+        } catch {
+            imageError = true;
         }
     }
 
@@ -108,6 +133,7 @@
             src={imageSrc}
             alt={game.title}
             class="absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.06]"
+            on:error={handleImageError}
         />
     {/if}
 

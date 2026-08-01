@@ -48,8 +48,7 @@ fn matches_host(domain: &str, patterns: &[String]) -> bool {
                 }
             }
         } else {
-            // Treat as domain suffix match
-            // "gofile.io" should match "gofile.io" and "www.gofile.io"
+            // Treat as domain suffix match: "host.io" matches "host.io" and "www.host.io"
             if domain == pattern || domain.ends_with(&format!(".{}", pattern)) {
                 return true;
             }
@@ -84,8 +83,7 @@ fn create_auto_detected_host(domain: &str) -> DetectedHost {
     }
 }
 
-/// Convert a domain to a nice label
-/// e.g., "gofile.io" -> "GoFile", "mega.nz" -> "Mega"
+/// Convert a domain name to a display label
 fn domain_to_label(domain: &str) -> String {
     // Remove common prefixes
     let domain = domain

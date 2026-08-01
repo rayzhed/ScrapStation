@@ -873,7 +873,7 @@ impl<'de> Deserialize<'de> for PathCondition {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UsePathStep {
-    /// Reference to named path (e.g., "paths.gofile")
+    /// Reference to a named path defined under the source's `paths:` key
     #[serde(rename = "use")]
     pub path_ref: String,
 
