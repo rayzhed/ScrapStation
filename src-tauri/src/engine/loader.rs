@@ -13,6 +13,10 @@ const BUNDLED_SOURCES: &[(&str, &str)] = &[
 
 fn seed_default_sources(sources_dir: &PathBuf) {
     for (name, content) in BUNDLED_SOURCES {
+        // Skip sources that were compiled as empty stubs (CI build without real YAMLs).
+        if content.is_empty() {
+            continue;
+        }
         let dest = sources_dir.join(name);
         // Always overwrite bundled defaults so updates ship with new builds.
         // User-created sources (any other filename) are never touched.
